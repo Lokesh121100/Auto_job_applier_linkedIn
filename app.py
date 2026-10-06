@@ -44,6 +44,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 USER_CONFIG_PATH = _overrides.USER_CONFIG_PATH
 LOG_PATH = os.path.join(ROOT, ".bot_run.log")
 PID_PATH = os.path.join(ROOT, ".bot_run.pid")
+NAUKRI_LOG_PATH = os.path.join(ROOT, ".naukri_run.log")
+NAUKRI_PID_PATH = os.path.join(ROOT, ".naukri_run.pid")
 
 PATH = 'all excels/'
 
@@ -67,12 +69,14 @@ def _load_defaults() -> dict:
         import config.questions as _questions
         import config.search as _search
         import config.settings as _settings
+        import config.naukri as _naukri
         modules = {
             "secrets": _secrets,
             "personals": _personals,
             "questions": _questions,
             "search": _search,
             "settings": _settings,
+            "naukri": _naukri,
         }
         # Reload in case they were already imported (with real overrides) earlier.
         for module in modules.values():
@@ -156,6 +160,8 @@ def _coerce(field_type: str, value):
 # ===========================================================================
 _bot_proc = None
 _bot_lock = threading.Lock()
+_naukri_proc = None
+_naukri_lock = threading.Lock()
 
 
 def _bot_command():
@@ -163,8 +169,13 @@ def _bot_command():
     return [sys.executable, os.path.join(ROOT, "runAiBot.py")]
 
 
+def _naukri_command():
+    '''The command used to launch the Naukri bot. Isolated so tests can monkeypatch it.'''
+    return [sys.executable, os.path.join(ROOT, "runNaukriBot.py")]
+
+
 def _is_running() -> bool:
-    '''True if the tracked bot subprocess exists and has not exited.'''
+    '''True if the tracked LinkedIn bot subprocess exists and has not exited.'''
     global _bot_proc
     if _bot_proc is None:
         return False
@@ -172,13 +183,25 @@ def _is_running() -> bool:
         return True
     # Process has exited; clean up tracking + PID file.
     _bot_proc = None
-    _remove_pid_file()
+    _remove_pid_file(PID_PATH)
     return False
 
 
-def _remove_pid_file():
+def _is_naukri_running() -> bool:
+    '''True if the tracked Naukri bot subprocess exists and has not exited.'''
+    global _naukri_proc
+    if _naukri_proc is None:
+        return False
+    if _naukri_proc.poll() is None:
+        return True
+    _naukri_proc = None
+    _remove_pid_file(NAUKRI_PID_PATH)
+    return False
+
+
+def _remove_pid_file(path: str = PID_PATH):
     try:
-        os.remove(PID_PATH)
+        os.remove(path)
     except OSError:
         pass
 
@@ -435,7 +458,7 @@ def api_stop():
         if _bot_proc is not None:
             _terminate(_bot_proc)
             _bot_proc = None
-        _remove_pid_file()
+        _remove_pid_file(PID_PATH)
         return jsonify({"running": False})
 
 
@@ -446,6 +469,84 @@ def api_status():
         running = _is_running()
         pid = _bot_proc.pid if (running and _bot_proc is not None) else None
         return jsonify({"running": running, "pid": pid})
+
+
+# Naukri runs as its own separate subprocess (own driver, own Chrome window), so it can
+# run independently of - or alongside - the LinkedIn bot above.
+@app.route('/api/naukri/run', methods=['POST'])
+def api_naukri_run():
+    '''Starts the Naukri bot as a subprocess if it isn't already running.'''
+    global _naukri_proc
+    with _naukri_lock:
+        if _is_naukri_running():
+            return jsonify({"running": True, "pid": _naukri_proc.pid,
+                            "message": "The Naukri bot is already running."})
+        try:
+            log_file = open(NAUKRI_LOG_PATH, "w", encoding="utf-8")
+            popen_kwargs = {
+                "cwd": ROOT,
+                "stdout": log_file,
+                "stderr": subprocess.STDOUT,
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
+            _naukri_proc = subprocess.Popen(_naukri_command(), **popen_kwargs)
+        except Exception as err:
+            return jsonify({"running": False, "error": str(err)}), 500
+        try:
+            with open(NAUKRI_PID_PATH, "w", encoding="utf-8") as pid_file:
+                pid_file.write(str(_naukri_proc.pid))
+        except OSError:
+            pass
+        return jsonify({"running": True, "pid": _naukri_proc.pid})
+
+
+@app.route('/api/naukri/stop', methods=['POST'])
+def api_naukri_stop():
+    '''Stops the running Naukri bot subprocess (and its children where possible).'''
+    global _naukri_proc
+    with _naukri_lock:
+        if _naukri_proc is not None:
+            _terminate(_naukri_proc)
+            _naukri_proc = None
+        _remove_pid_file(NAUKRI_PID_PATH)
+        return jsonify({"running": False})
+
+
+@app.route('/api/naukri/status', methods=['GET'])
+def api_naukri_status():
+    '''Reports whether the Naukri bot subprocess is currently running.'''
+    with _naukri_lock:
+        running = _is_naukri_running()
+        pid = _naukri_proc.pid if (running and _naukri_proc is not None) else None
+        return jsonify({"running": running, "pid": pid})
+
+
+@app.route('/api/naukri/logs', methods=['GET'])
+def api_naukri_logs():
+    '''Same contract as /api/logs, but for the Naukri run log.'''
+    try:
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0:
+        offset = 0
+    if not os.path.exists(NAUKRI_LOG_PATH):
+        return jsonify({"content": "", "next_offset": 0})
+    try:
+        with open(NAUKRI_LOG_PATH, "rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            if offset > size:
+                offset = 0
+            log_file.seek(offset)
+            data = log_file.read()
+        content = data.decode("utf-8", errors="replace")
+        return jsonify({"content": content, "next_offset": offset + len(data)})
+    except OSError as err:
+        return jsonify({"content": "", "next_offset": offset, "error": str(err)})
 
 
 @app.route('/api/logs', methods=['GET'])

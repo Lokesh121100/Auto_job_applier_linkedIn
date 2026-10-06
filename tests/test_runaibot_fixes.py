@@ -178,3 +178,108 @@ def test_easy_apply_detection_is_an_ordered_fallback_list(bot):
 # ------------------------------- M: the no-submit flag -----------------------------
 def test_stop_before_submit_setting_is_always_defined(bot):
     assert isinstance(bot.stop_before_submit, bool)
+
+
+# ------------------------- N: survey and company-by-company mode ---------------------
+def test_survey_csv_round_trips_into_company_list_most_postings_first(bot, tmp_path, monkeypatch):
+    survey = tmp_path / "survey.csv"
+    monkeypatch.setattr(bot, "survey_file_name", str(survey))
+    monkeypatch.setattr(bot, "target_companies", [])
+    bot.write_company_survey({
+        "Small Co": {"postings_seen": 1, "actively_hiring_signal": False, "sample_titles": {"Analyst"}},
+        "Big Co": {"postings_seen": 7, "actively_hiring_signal": True, "sample_titles": {"Developer"}},
+    })
+    assert bot.load_target_companies() == ["Big Co", "Small Co"]
+
+
+def test_explicit_target_companies_win_over_the_survey(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "survey_file_name", str(tmp_path / "survey.csv"))
+    monkeypatch.setattr(bot, "target_companies", ["Microsoft"])
+    assert bot.load_target_companies() == ["Microsoft"]
+
+
+def test_no_targets_and_no_survey_gives_an_empty_list(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "survey_file_name", str(tmp_path / "missing.csv"))
+    monkeypatch.setattr(bot, "target_companies", [])
+    assert bot.load_target_companies() == []
+
+
+# ------------------------------- O: referral requests --------------------------------
+def test_referral_note_fills_placeholders_and_fits_linkedins_limit(bot, monkeypatch):
+    monkeypatch.setattr(bot, "first_name", "Lokesh")
+    monkeypatch.setattr(bot, "last_name", "J")
+    note = bot.referral_note("Asha", "Power BI Developer", "Philips")
+    assert note.startswith("Hi Asha,") and "Power BI Developer" in note and "Philips" in note and "Lokesh J" in note
+    long_note = bot.referral_note("Asha", "Data Analyst II (Sharepoint/ PowerApps/ Power Automate Developer)- Only Bangalore Based Candidates", "AtkinsRealis")
+    assert len(long_note) <= bot.REFERRAL_NOTE_LIMIT
+    assert long_note.endswith("Lokesh J")
+
+
+def test_referral_targets_are_only_submitted_easy_applies_one_per_company(bot, tmp_path, monkeypatch):
+    applied = tmp_path / "applied.csv"
+    applied.write_text(
+        "Company,Title,External Job link,Date Applied,HR Link,HR Name\n"
+        "GIVA,Business Analyst,Easy Applied,2026-10-01 11:50:09,Unknown,Unknown\n"
+        "Philips,Power BI Developer,https://careers.philips.com/x,Pending,Unknown,Unknown\n"
+        "GIVA,Data Analyst,Easy Applied,2026-10-01 11:55:00,Unknown,Unknown\n"
+        "Jobgether,Data Engineer,Easy Applied,Pending,Unknown,Unknown\n"
+        "Kaufman Rossin,Analyst,Easy Applied,2026-10-01 11:58:00,Unknown,Unknown\n",
+        encoding="utf-8")
+    monkeypatch.setattr(bot, "file_name", str(applied))
+    targets = bot.load_referral_targets()
+    assert [(t["Company"], t["Title"]) for t in targets] == [("Kaufman Rossin", "Analyst"), ("GIVA", "Data Analyst")]
+
+
+@pytest.mark.parametrize("full, short", [
+    ("ZettaMine Labs Pvt. Ltd.", "ZettaMine Labs"),
+    ("Weekday AI (YC W21)", "Weekday AI"),
+    ("FyerX Global Private Limited", "FyerX Global"),
+    ("Smart IMS Inc.", "Smart IMS"),
+    ("Kaufman Rossin", "Kaufman Rossin"),
+    ("GIVA", "GIVA"),
+])
+def test_company_names_are_shortened_to_what_profiles_show(bot, full, short):
+    assert bot.short_company_name(full) == short
+
+
+def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, "referral_file_name", str(tmp_path / "referrals.csv"))
+    bot.record_referral("GIVA", "Business Analyst", "Asha K", "https://www.linkedin.com/in/asha", "Hiring team", "Sent with note")
+    bot.record_referral("GIVA", "Business Analyst", "Ravi M", "https://www.linkedin.com/in/ravi", "People search", "Skipped - no Connect button (already connected, pending, or follow-only)")
+    contacted, per_company, today = bot.load_referral_history()
+    assert contacted == {"https://www.linkedin.com/in/asha"}
+    assert per_company == {"GIVA": 1}
+    assert today == 1
+
+
+# ------------------------------- N: location via URL, not the UI box ----------------
+def test_jobs_search_url_includes_both_keywords_and_location(bot, monkeypatch):
+    monkeypatch.setattr(bot, "search_location", "Singapore")
+    url = bot.jobs_search_url("Power Platform Developer")
+    assert url == "https://www.linkedin.com/jobs/search/?keywords=Power%20Platform%20Developer&location=Singapore"
+
+
+def test_jobs_search_url_with_no_keywords_for_company_mode(bot, monkeypatch):
+    monkeypatch.setattr(bot, "search_location", "Singapore")
+    url = bot.jobs_search_url()
+    assert url == "https://www.linkedin.com/jobs/search/?location=Singapore"
+
+
+def test_jobs_search_url_omits_location_when_blank(bot, monkeypatch):
+    monkeypatch.setattr(bot, "search_location", "")
+    url = bot.jobs_search_url("Data Analyst")
+    assert url == "https://www.linkedin.com/jobs/search/?keywords=Data%20Analyst"
+    assert "location=" not in url
+
+
+# ------------------------------- O: multi-location search -----------------------------
+def test_locations_to_search_falls_back_to_single_location(bot, monkeypatch):
+    monkeypatch.setattr(bot, "search_locations", [])
+    monkeypatch.setattr(bot, "search_location", "India")
+    assert bot.locations_to_search() == ["India"]
+
+
+def test_locations_to_search_uses_the_list_when_set(bot, monkeypatch):
+    monkeypatch.setattr(bot, "search_locations", ["Singapore", "Chennai", "Bengaluru"])
+    monkeypatch.setattr(bot, "search_location", "India")
+    assert bot.locations_to_search() == ["Singapore", "Chennai", "Bengaluru"]

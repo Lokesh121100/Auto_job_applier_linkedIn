@@ -22,3 +22,9 @@ apikeys.py
 user_config.json
 .bot_run.log
 .bot_run.pid
+.naukri_run.log
+.naukri_run.pid
+app_log.txt
+
+# Local Claude Code session settings — machine-specific, not part of the project
+.claude/

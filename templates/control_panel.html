@@ -265,6 +265,7 @@
         var MODEL_FIELDS = [];  // [{datalistId, models}] for provider-aware model lists
         var activeTab = null;
         var logOffset = 0;
+        var naukriLogOffset = 0;
         var pollTimer = null;
 
         // ---- helpers ----
@@ -428,6 +429,13 @@
             tabs.appendChild(runBtn);
             panels.appendChild(buildRunPanel());
 
+            // Extra "Run Naukri" tab - separate bot, separate process, separate log.
+            var naukriRunBtn = el('button', { type: 'button', text: 'Run Naukri' });
+            naukriRunBtn.dataset.tab = 'Run Naukri';
+            naukriRunBtn.addEventListener('click', function () { showTab('Run Naukri'); });
+            tabs.appendChild(naukriRunBtn);
+            panels.appendChild(buildNaukriRunPanel());
+
             wireAi();
             updateModelLists();
             applyAiState();
@@ -444,8 +452,10 @@
                 p.classList.toggle('active', p.dataset.tab === name);
             });
             var isRun = (name === 'Run');
-            document.getElementById('savebar').style.display = isRun ? 'none' : 'flex';
+            var isNaukriRun = (name === 'Run Naukri');
+            document.getElementById('savebar').style.display = (isRun || isNaukriRun) ? 'none' : 'flex';
             if (isRun) { refreshStatus(); refreshLogs(); loadAppliedJobs(); }
+            if (isNaukriRun) { refreshNaukriStatus(); refreshNaukriLogs(); }
         }
 
         // ---- AI master switch + model lists ----
@@ -531,6 +541,103 @@
             return panel;
         }
 
+        // ---- Run Naukri tab (separate bot, separate process) ----
+        function buildNaukriRunPanel() {
+            var panel = el('div', { class: 'panel' });
+            panel.dataset.tab = 'Run Naukri';
+
+            panel.appendChild(el('div', { class: 'note', html:
+                'This runs on <strong>your computer</strong> using <strong>your own Naukri.com account</strong> ' +
+                '(fill in the Naukri tab first). It runs independently of the LinkedIn bot above - you can run ' +
+                'either one on its own, or both at the same time, each in its own Chrome window. Most Naukri jobs ' +
+                'use "Apply on company site", which the bot cannot fill in - those are logged with their link for ' +
+                'you to finish by hand instead of being counted as applied.' }));
+
+            var runbox = el('div', { class: 'runbox' });
+            var statusLine = el('div', { class: 'status-line' });
+            statusLine.appendChild(el('span', { class: 'dot', id: 'naukriStatusDot' }));
+            statusLine.appendChild(el('span', { id: 'naukriStatusText', text: 'Checking status...' }));
+            runbox.appendChild(statusLine);
+
+            var actions = el('div', { class: 'run-actions' });
+            var startBtn = el('button', { class: 'btn', id: 'naukriStartBtn', type: 'button', text: 'Start' });
+            var stopBtn = el('button', { class: 'btn danger', id: 'naukriStopBtn', type: 'button', text: 'Stop' });
+            startBtn.addEventListener('click', startNaukriBot);
+            stopBtn.addEventListener('click', stopNaukriBot);
+            actions.appendChild(startBtn);
+            actions.appendChild(stopBtn);
+            runbox.appendChild(actions);
+            runbox.appendChild(el('p', { class: 'muted-small',
+                text: 'Tip: save your Naukri email/password on the Naukri tab before starting.' }));
+            panel.appendChild(runbox);
+
+            panel.appendChild(el('h2', { class: 'section-h', text: 'Activity log' }));
+            panel.appendChild(el('pre', { class: 'log', id: 'naukriLogPane', text: 'No activity yet.' }));
+
+            return panel;
+        }
+
+        function setNaukriRunningUI(running, pid) {
+            var dot = document.getElementById('naukriStatusDot');
+            var text = document.getElementById('naukriStatusText');
+            var startBtn = document.getElementById('naukriStartBtn');
+            var stopBtn = document.getElementById('naukriStopBtn');
+            if (!dot) return;
+            if (running) {
+                dot.classList.add('on');
+                text.textContent = 'Running' + (pid ? ' (process ' + pid + ')' : '') + '...';
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+            } else {
+                dot.classList.remove('on');
+                text.textContent = 'Not running';
+                if (startBtn) startBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+            }
+        }
+
+        function refreshNaukriStatus() {
+            fetch('/api/naukri/status').then(function (r) { return r.json(); })
+                .then(function (s) { setNaukriRunningUI(s.running, s.pid); })
+                .catch(function () {});
+        }
+
+        function refreshNaukriLogs() {
+            fetch('/api/naukri/logs?offset=' + naukriLogOffset).then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (typeof data.next_offset === 'number' && data.next_offset < naukriLogOffset) {
+                        naukriLogOffset = 0;
+                        document.getElementById('naukriLogPane').textContent = '';
+                    }
+                    if (data.content) {
+                        var pane = document.getElementById('naukriLogPane');
+                        if (pane.textContent === 'No activity yet.') pane.textContent = '';
+                        var atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 20;
+                        pane.textContent += data.content;
+                        if (atBottom) pane.scrollTop = pane.scrollHeight;
+                    }
+                    if (typeof data.next_offset === 'number') naukriLogOffset = data.next_offset;
+                })
+                .catch(function () {});
+        }
+
+        function startNaukriBot() {
+            var msgOk = confirm('Start applying on Naukri now?\n\nA separate browser window will open and use your Naukri.com account. Keep it in the foreground.');
+            if (!msgOk) return;
+            var pane = document.getElementById('naukriLogPane');
+            pane.textContent = '';
+            naukriLogOffset = 0;
+            fetch('/api/naukri/run', { method: 'POST' }).then(function (r) { return r.json(); })
+                .then(function (s) { setNaukriRunningUI(s.running, s.pid); refreshNaukriLogs(); })
+                .catch(function () {});
+        }
+
+        function stopNaukriBot() {
+            fetch('/api/naukri/stop', { method: 'POST' }).then(function (r) { return r.json(); })
+                .then(function (s) { setNaukriRunningUI(s.running, s.pid); })
+                .catch(function () {});
+        }
+
         function setRunningUI(running, pid) {
             var dot = document.getElementById('statusDot');
             var text = document.getElementById('statusText');
@@ -595,6 +702,7 @@
 
         function pollLoop() {
             if (activeTab === 'Run') { refreshStatus(); refreshLogs(); }
+            if (activeTab === 'Run Naukri') { refreshNaukriStatus(); refreshNaukriLogs(); }
             pollTimer = setTimeout(pollLoop, 1500);
         }
 

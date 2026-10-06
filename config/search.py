@@ -21,14 +21,34 @@ version:    26.01.20.5.08
 # Enter your search terms inside '[ ]' with quotes ' "searching title" ' for each search followed by comma ', ' Eg: ["Software Engineer", "Software Developer", "Selenium Developer"]
 search_terms = ["Software Engineer", "Software Developer", "Python Developer", "Selenium Developer", "React Developer", "Java Developer", "Front End Developer", "Full Stack Developer", "Web Developer", "Nodejs Developer"]
 
-# Search location, this will be filled in "City, state, or zip code" search box. If left empty as "", tool will not fill it.
+# Search location, passed straight through LinkedIn's search URL. If left empty as "", tool will not filter by location.
 search_location = "United States"               # Some valid examples: "", "United States", "India", "Chicago, Illinois, United States", "90001, Los Angeles, California, United States", "Bengaluru, Karnataka, India", etc.
+
+# Search every one of these locations in turn (survey, company mode, and job-title search all
+# use it) instead of just the single `search_location` above. Leave empty as [] to search only
+# `search_location`, same as before.
+search_locations = []            # Eg: ["Singapore", "Chennai, Tamil Nadu, India", "Bengaluru, Karnataka, India"]
 
 # After how many number of applications in current search should the bot switch to next search? 
 switch_number = 30                 # Only numbers greater than 0... Don't put in quotes
 
 # Do you want to randomize the search order for search_terms?
 randomize_search_order = False     # True of False, Note: True or False are case-sensitive
+
+
+# >>>>>>>>>>> Company-by-company mode <<<<<<<<<<<
+# First visit each company in turn, list ALL of its openings and apply to the relevant ones,
+# then also do the normal search by `search_terms`.
+company_mode = False               # True or False, Note: True or False are case-sensitive
+
+# Companies to visit, names exactly as on LinkedIn. If left empty as [], the companies found
+# by the last survey (`survey_file_name` in config/settings.py) are used, most postings first,
+# and if there is no survey yet, one runs automatically first to find them.
+target_companies = []              # Eg: ["Microsoft", "Accenture", "Tata Consultancy Services"]
+
+# A company's openings include every department, so only apply when the job title contains
+# at least one of these words or phrases (whole-word, case-insensitive). [] applies to all.
+company_mode_title_keywords = []   # Eg: ["Developer", "Engineer", "Power Platform", "SharePoint", ".NET"]
 
 
 # >>>>>>>>>>> Job Search Filters <<<<<<<<<<<

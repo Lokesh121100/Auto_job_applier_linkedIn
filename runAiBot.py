@@ -28,13 +28,14 @@ csv.field_size_limit(1000000)
 
 from random import choice, shuffle
 from datetime import datetime
+from urllib.parse import quote
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support.select import Select
 from selenium.webdriver.remote.webelement import WebElement
-from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException, NoSuchWindowException, ElementNotInteractableException, WebDriverException
+from selenium.common.exceptions import NoSuchElementException, ElementClickInterceptedException, NoSuchWindowException, ElementNotInteractableException, WebDriverException, StaleElementReferenceException, TimeoutException
 
 from config.personals import *
 from config.questions import *
@@ -99,6 +100,15 @@ class UnansweredQuestions(Exception):
     '''
     Raised when required questions have no answer in `config/questions.py`. The job is
     skipped, not failed - there is nothing broken to retry, the user has to add answers.
+    '''
+
+class CompanyFilterFailed(Exception):
+    '''
+    Raised in `by_companies` mode after too many jobs in a row belong to the wrong company.
+    `switch_number` only counts real applications, not skips, so when LinkedIn's Company
+    filter silently fails to apply, nothing ever stops the bot paging through LinkedIn's
+    entire unfiltered result set for that one company - it used to do this for hours until
+    Chrome itself crashed. This gives up on the company early instead, and moves on.
     '''
 
 tabs_count = 1
@@ -246,8 +256,26 @@ def set_search_location() -> None:
     if search_location.strip():
         try:
             print_lg(f'Setting search location as: "{search_location.strip()}"')
-            search_location_ele = try_xp(driver, ".//input[@aria-label='City, state, or zip code'and not(@disabled)]", False) #  and not(@aria-hidden='true')]")
-            text_input(actions, search_location_ele, search_location, "Search Location")
+            # The location box isn't always rendered the instant the search page loads, so a
+            # single immediate find_element (try_xp's usual job) was racing the page and losing
+            # most of the time - the location silently never got set and the search fell back
+            # to LinkedIn's default (the account's own profile location). Give it a real wait.
+            location_xpath = ".//input[@aria-label='City, state, or zip code' and not(@disabled)]"
+            try:
+                # The shared 5s `wait` was timing out here often enough to matter - this box
+                # is slower to render than most, so it gets its own longer wait instead of
+                # raising the shared default (which other callers rely on staying short).
+                search_location_ele = WebDriverWait(driver, 12).until(EC.presence_of_element_located((By.XPATH, location_xpath)))
+            except TimeoutException:
+                search_location_ele = False
+                save_page_once("search_location_box_missing")
+            try:
+                text_input(actions, search_location_ele, search_location, "Search Location")
+            except StaleElementReferenceException:
+                # The page swapped this input for a new one between locating it and typing into
+                # it (seen moments after navigating to a fresh search). One fresh look is enough.
+                search_location_ele = try_xp(driver, location_xpath, False)
+                text_input(actions, search_location_ele, search_location, "Search Location")
         except ElementNotInteractableException:
             try_xp(driver, ".//label[@class='jobs-search-box__input-icon jobs-search-box__keywords-label']")
             actions.send_keys(Keys.TAB, Keys.TAB).perform()
@@ -1159,27 +1187,80 @@ def questions_are_stalled(previous_blocked: set | None) -> bool:
 
 
 
+def load_target_companies() -> list[str]:
+    '''
+    Companies for `company_mode`: `target_companies` if set, else the Company column of the
+    last survey (already sorted most postings first). Empty if neither exists.
+    '''
+    if target_companies: return list(target_companies)
+    try:
+        with open(survey_file_name, encoding='utf-8') as csv_file:
+            return [row['Company'] for row in csv.DictReader(csv_file) if row.get('Company')]
+    except FileNotFoundError:
+        return []
+
+
+def jobs_search_url(keywords: str = "") -> str:
+    '''
+    Builds the LinkedIn jobs search URL with `search_location` baked in as the `location`
+    query param. LinkedIn's 2026 redesign replaced the old two-box keyword/location search
+    bar with a single semantic search box, so the location text field `set_search_location()`
+    used to type into no longer exists on the page at all - no amount of waiting fixes that.
+    The `location` URL param is unaffected by that UI change and LinkedIn's search backend
+    still honours it directly, so this is now the reliable way to set it; `set_search_location()`
+    is kept as a secondary attempt in case LinkedIn ever restores an on-page location field.
+    '''
+    url = "https://www.linkedin.com/jobs/search/"
+    params = []
+    if keywords: params.append(f"keywords={quote(keywords)}")
+    if search_location.strip(): params.append(f"location={quote(search_location.strip())}")
+    return url + ("?" + "&".join(params) if params else "")
+
+
 # Function to apply to jobs
-def apply_to_jobs(search_terms: list[str]) -> None:
+def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None) -> None:
+    '''
+    Searches once per entry and applies to the results. Normally each entry is a search term.
+    With `by_companies`, each entry is a company instead: no keyword, the Company filter set
+    to just that company, so every one of its openings is listed.
+    '''
     applied_jobs = get_applied_job_ids()
     rejected_jobs = set()
     blacklisted_companies = set()
-    global current_city, failed_count, skip_count, easy_applied_count, external_jobs_count, tabs_count, pause_before_submit, pause_at_failed_question, useNewResume
+    global current_city, failed_count, skip_count, easy_applied_count, external_jobs_count, tabs_count, pause_before_submit, pause_at_failed_question, useNewResume, companies
     current_city = current_city.strip()
 
-    if randomize_search_order:  shuffle(search_terms)
-    for searchTerm in search_terms:
-        driver.get(f"https://www.linkedin.com/jobs/search/?keywords={searchTerm}")
+    searches = list(by_companies) if by_companies else list(search_terms)
+    if randomize_search_order:  shuffle(searches)
+    for searchTerm in searches:
         print_lg("\n________________________________________________________________________________________________________________________\n")
-        print_lg(f'\n>>>> Now searching for "{searchTerm}" <<<<\n\n')
+        if by_companies:
+            companies = [searchTerm]
+            driver.get(jobs_search_url())
+            print_lg(f'\n>>>> Now checking openings at "{searchTerm}" <<<<\n\n')
+        else:
+            driver.get(jobs_search_url(searchTerm))
+            print_lg(f'\n>>>> Now searching for "{searchTerm}" <<<<\n\n')
 
         apply_filters()
 
         current_count = 0
+        # Consecutive jobs seen at the wrong company - a run of these means the Company filter
+        # never applied, so this company's results are really LinkedIn's whole unfiltered set.
+        company_filter_misses = 0
+        COMPANY_FILTER_MISS_LIMIT = 15
         try:
             while current_count < switch_number:
-                # Wait until job listings are loaded
-                wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
+                # Wait until job listings are loaded. TimeoutException is a WebDriverException
+                # subclass, so without this a search with genuinely zero results (easy to hit on
+                # a smaller market like Singapore) or just a slow-loading page was caught by the
+                # "browser crashed" handler below and killed the WHOLE run, not just this term.
+                try:
+                    wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
+                except TimeoutException:
+                    print_lg(f'No job listings loaded for "{searchTerm}" - either zero results for this search, '
+                             f"or the page loaded slowly. Moving on.")
+                    break
 
                 pagination_element, current_page = get_page_info()
 
@@ -1198,9 +1279,32 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                     if current_count >= switch_number: break
                     print_lg("\n-@-\n")
 
-                    job_id,title,company,work_location,work_style,skip = get_job_main_details(job, blacklisted_companies, rejected_jobs)
-                    
+                    # NoSuchElementException/StaleElementReferenceException are ordinary scrape
+                    # glitches (LinkedIn virtualises and re-renders this list while scrolling) -
+                    # NoSuchElementException is actually a WebDriverException subclass, so without
+                    # this it was caught by the "browser crashed" handler below and killed the
+                    # whole run over a single bad card instead of just skipping that one job.
+                    try:
+                        job_id,title,company,work_location,work_style,skip = get_job_main_details(job, blacklisted_companies, rejected_jobs)
+                    except (NoSuchElementException, StaleElementReferenceException) as e:
+                        logger.warning("Couldn't read this job card, skipping it. %s", type(e).__name__)
+                        skip_count += 1
+                        continue
+
                     if skip: continue
+                    if by_companies:
+                        if company.casefold() != searchTerm.casefold():
+                            company_filter_misses += 1
+                            print_lg(f'Skipping "{title} | {company}": not at "{searchTerm}" (the Company filter may not have applied).')
+                            skip_count += 1
+                            if company_filter_misses >= COMPANY_FILTER_MISS_LIMIT:
+                                raise CompanyFilterFailed(searchTerm)
+                            continue
+                        company_filter_misses = 0
+                        if company_mode_title_keywords and not find_bad_word(title, company_mode_title_keywords):
+                            print_lg(f'Skipping "{title} | {company}": title has none of company_mode_title_keywords.')
+                            skip_count += 1
+                            continue
                     # Redundant fail safe check for applied jobs!
                     try:
                         if job_id in applied_jobs or find_by_class(driver, "jobs-s-apply__application-link", 2):
@@ -1457,6 +1561,11 @@ def apply_to_jobs(search_terms: list[str]) -> None:
                     print_lg(f"\n>-> Didn't find Page {current_page+1}. Probably at the end page of results!\n")
                     break
 
+        except CompanyFilterFailed:
+            print_lg(f'Giving up on "{searchTerm}": {COMPANY_FILTER_MISS_LIMIT} jobs in a row were at the wrong company, '
+                     f"so LinkedIn's Company filter almost certainly never applied here. Moving on to the next company.")
+            skip_count += 1
+            continue
         except (NoSuchWindowException, WebDriverException) as e:
             logger.error("The browser window was closed or the session became invalid. Stopping.", exc_info=e)
             raise e  # let the outer handler deal with it
@@ -1468,7 +1577,337 @@ def apply_to_jobs(search_terms: list[str]) -> None:
             except Exception as dump_error:
                 logger.warning("Could not capture the page source; the browser may have crashed. %s", dump_error)
 
-        
+
+# Phrases LinkedIn's own UI uses to flag that a company is actively hiring. Matched as a
+# plain case-insensitive substring of the job card's text, so this degrades gracefully -
+# if LinkedIn renames or removes the badge, the company is still recorded, just without
+# the signal, instead of the whole scan breaking.
+hiring_signal_phrases = ["actively hiring", "actively recruiting", "actively reviewing applicants"]
+
+
+def locations_to_search() -> list[str]:
+    '''`search_locations` if set, else just `[search_location]` - the single-location default.'''
+    return list(search_locations) if search_locations else [search_location]
+
+
+def survey_companies(search_terms: list[str]) -> None:
+    '''
+    Read-only scan of search results: records every company seen, how many postings,
+    a sample of job titles, and whether LinkedIn flagged it as actively hiring/recruiting.
+    Never opens an application or clicks Apply. Writes to `survey_file_name` so you can
+    review which companies have openings before narrowing `companies` in
+    config/search.py and turning `survey_mode` back off to actually apply.
+
+    Loops every location in `locations_to_search()`, merging them all into one combined
+    survey (one company seen in two locations is one row, not two), so a multi-location
+    `search_locations` list builds a single company list covering all of them.
+    '''
+    global search_location
+    companies_seen: dict[str, dict] = {}
+    if randomize_search_order: shuffle(search_terms)
+    for loc in locations_to_search():
+        search_location = loc
+        for searchTerm in search_terms:
+            driver.get(jobs_search_url(searchTerm))
+            print_lg("\n________________________________________________________________________________________________________________________\n")
+            print_lg(f'\n>>>> Surveying companies for "{searchTerm}" in "{loc}" <<<<\n\n')
+            apply_filters()
+            try:
+                while True:
+                    wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
+                    pagination_element, current_page = get_page_info()
+                    buffer(3)
+                    job_listings = driver.find_elements(By.XPATH, "//li[@data-occludable-job-id]")
+                    for job in job_listings:
+                        try:
+                            company = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__subtitle')]").text.strip()
+                            title_ele = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a")
+                            title = (title_ele.get_dom_attribute('aria-label') or title_ele.text).split("\n")[0].strip()
+                            hiring_signal = any(phrase in job.text.lower() for phrase in hiring_signal_phrases)
+                        except Exception:
+                            continue
+                        if not company: continue
+                        entry = companies_seen.setdefault(company, {"postings_seen": 0, "actively_hiring_signal": False, "sample_titles": set()})
+                        entry["postings_seen"] += 1
+                        entry["actively_hiring_signal"] = entry["actively_hiring_signal"] or hiring_signal
+                        if title: entry["sample_titles"].add(title)
+                    if pagination_element is None or current_page is None:
+                        print_lg("Couldn't find pagination element, probably at the end page of results!")
+                        break
+                    if survey_max_pages and current_page >= survey_max_pages:
+                        break
+                    try:
+                        pagination_element.find_element(By.XPATH, f".//button[@aria-label='Page {current_page+1}']").click()
+                        print_lg(f"\n>-> Now on Page {current_page+1} \n")
+                        buffer(3)
+                    except NoSuchElementException:
+                        print_lg(f"\n>-> Didn't find Page {current_page+1}. Probably at the end page of results!\n")
+                        break
+            except (NoSuchWindowException, WebDriverException) as e:
+                logger.error("The browser window was closed or the session became invalid. Stopping survey.", exc_info=e)
+                raise e
+            except Exception as e:
+                logger.error("Survey of this search term failed partway through.")
+                critical_error_log("In Survey", e)
+            # Saved after every term, so stopping a long survey early keeps what it found.
+            write_company_survey(companies_seen)
+
+
+def write_company_survey(companies_seen: dict) -> None:
+    '''Writes the companies found by `survey_companies` to `survey_file_name`, most postings first.'''
+    try:
+        folder = os.path.dirname(survey_file_name)
+        if folder: os.makedirs(folder, exist_ok=True)
+        with open(survey_file_name, mode='w', newline='', encoding='utf-8') as csv_file:
+            fieldnames = ['Company', 'Postings Seen', 'Actively Hiring Signal', 'Sample Job Titles']
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+            writer.writeheader()
+            for company, info in sorted(companies_seen.items(), key=lambda kv: kv[1]['postings_seen'], reverse=True):
+                writer.writerow({
+                    'Company': company,
+                    'Postings Seen': info['postings_seen'],
+                    'Actively Hiring Signal': info['actively_hiring_signal'],
+                    'Sample Job Titles': truncate_for_csv('; '.join(sorted(info['sample_titles']))),
+                })
+        print_lg(f"\nSurvey complete. {len(companies_seen)} companies found. Written to {survey_file_name}\n")
+    except Exception as e:
+        logger.error("Failed to write the company survey!", exc_info=e)
+
+
+REFERRAL_NOTE_LIMIT = 200
+referral_fields = ['Date', 'Company', 'Job Title', 'Person', 'Profile Link', 'Found Via', 'Action']
+referral_pages_saved = set()
+
+
+def save_page_once(kind: str) -> None:
+    '''Saves the current page to logs/ the first time `kind` happens in a run, to fix selectors from.'''
+    if kind in referral_pages_saved: return
+    referral_pages_saved.add(kind)
+    try:
+        path = os.path.join(logs_folder_path, f"referral_debug_{kind}.html")
+        with open(path, "w", encoding="utf-8") as page_file:
+            page_file.write(driver.page_source)
+        print_lg(f"Saved the page for '{kind}' to {path}")
+    except Exception as e:
+        logger.warning("Could not save the %s page: %s", kind, e)
+
+
+def referral_note(their_first_name: str, job_title: str, company: str) -> str:
+    '''Fills `referral_message`, shortening the job title, then the whole note, to fit LinkedIn's limit.'''
+    my_name = f"{first_name} {last_name}".strip()
+    def fill(title: str) -> str:
+        return referral_message.format(first_name=their_first_name or "there", job_title=title, company=company, my_name=my_name)
+    note = fill(job_title)
+    if len(note) > REFERRAL_NOTE_LIMIT:
+        room = len(job_title) - (len(note) - REFERRAL_NOTE_LIMIT)
+        note = fill(job_title[:max(room, 0)].rstrip(" -,|(") or "open")
+    return note[:REFERRAL_NOTE_LIMIT]
+
+
+def load_referral_targets() -> list[dict]:
+    '''One entry per company actually applied to (Easy Apply, submitted), most recent first.'''
+    targets: dict[str, dict] = {}
+    try:
+        with open(file_name, encoding='utf-8') as csv_file:
+            for row in csv.DictReader(csv_file):
+                if row.get('External Job link') != "Easy Applied" or row.get('Date Applied') in ('', 'Pending', None): continue
+                company = (row.get('Company') or '').strip()
+                if company: targets[company] = row
+    except FileNotFoundError:
+        return []
+    return sorted(targets.values(), key=lambda row: row['Date Applied'], reverse=True)
+
+
+def load_referral_history() -> tuple[set[str], dict[str, int], int]:
+    '''Returns (profile links already contacted, requests per company, requests sent today).'''
+    contacted, per_company, today_count = set(), {}, 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        with open(referral_file_name, encoding='utf-8') as csv_file:
+            for row in csv.DictReader(csv_file):
+                # Skipped or failed people are tried again on the next run.
+                if not row['Action'].startswith("Sent"): continue
+                contacted.add(row['Profile Link'])
+                per_company[row['Company']] = per_company.get(row['Company'], 0) + 1
+                if row['Date'].startswith(today): today_count += 1
+    except FileNotFoundError:
+        pass
+    return contacted, per_company, today_count
+
+
+def record_referral(company: str, job_title: str, person: str, profile_link: str, found_via: str, action: str) -> None:
+    try:
+        folder = os.path.dirname(referral_file_name)
+        if folder: os.makedirs(folder, exist_ok=True)
+        with open(referral_file_name, mode='a', newline='', encoding='utf-8') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=referral_fields)
+            if csv_file.tell() == 0: writer.writeheader()
+            writer.writerow({'Date': datetime.now().strftime("%Y-%m-%d %H:%M"), 'Company': company, 'Job Title': job_title,
+                             'Person': person, 'Profile Link': profile_link, 'Found Via': found_via, 'Action': action})
+    except Exception as e:
+        logger.error("Failed to record the referral request!", exc_info=e)
+
+
+def send_connection_request(person_name: str, note: str) -> str:
+    '''
+    On the open profile page, clicks Connect for `person_name`, adds `note` and sends. Falls back
+    to sending without a note when LinkedIn's free note quota is used up. Returns the action
+    taken, starting with "Sent" only when a request actually went out.
+    '''
+    # Only the profile's own button: its aria-label is "Invite <name> to connect", while the
+    # "People also viewed" sidebar has Connect buttons for other people.
+    first = (person_name.split() or [""])[0].replace("'", "")
+    name_check = f" and contains(@aria-label, '{first}')" if first else ""
+    # Connect is now an <a> (".../custom-invite/?vanityName=..."), it used to be a <button>.
+    connect_xpath = f"//main//*[self::a or self::button or @role='button'][contains(@aria-label, 'to connect'){name_check}]"
+    connect = pick_first_displayed(driver.find_elements(By.XPATH, connect_xpath))
+    if not connect:
+        more = pick_first_displayed(driver.find_elements(By.XPATH, "//main//*[self::button or @role='button'][contains(@aria-label, 'More')]"))
+        if more:
+            more.click()
+            buffer(click_gap)
+            connect = pick_first_displayed(driver.find_elements(By.XPATH, connect_xpath.replace("//main", "")))
+    if not connect:
+        save_page_once("profile_no_connect")
+        actions.send_keys(Keys.ESCAPE).perform()
+        return "Skipped - no Connect button (already connected, pending, or follow-only)"
+    scroll_to_view(driver, connect)
+    invite_url = connect.get_attribute("href")
+    connect.click()
+    buffer(click_gap + 1)
+    # LinkedIn renders the invite inside <iframe data-testid="interop-iframe" src="/preload/...">.
+    # The frame is styled opacity 0 so Selenium calls it hidden: don't filter it on displayed.
+    in_frame = False
+    frames = driver.find_elements(By.XPATH, "//iframe[@data-testid='interop-iframe' or contains(@src, '/preload/')]")
+    if frames:
+        try:
+            driver.switch_to.frame(frames[0])
+            in_frame = True
+        except Exception:
+            pass
+    # Inside the frame there is nothing but the invite; on the page itself, stay inside a dialog.
+    scope = "" if in_frame else "//*[@role='dialog' or self::dialog or contains(@class, 'artdeco-modal')]"
+    try:
+        try: WebDriverWait(driver, 6).until(lambda d: invite_button(scope, "add a note") or invite_button(scope, "send"))
+        except Exception: pass
+        save_page_once("invite_frame" if in_frame else "invite_dialog")
+        if not (invite_button(scope, "add a note") or invite_button(scope, "send")) and invite_url and "invite" in invite_url:
+            # The invite never rendered here: open the invite page itself instead.
+            if in_frame:
+                driver.switch_to.default_content()
+                in_frame = False
+            driver.get(invite_url)
+            scope = "//*[@role='dialog' or self::dialog or contains(@class, 'artdeco-modal') or self::main]"
+            try: WebDriverWait(driver, 8).until(lambda d: invite_button(scope, "add a note") or invite_button(scope, "send"))
+            except Exception: pass
+            save_page_once("invite_direct")
+        add_note = invite_button(scope, "add a note")
+        if add_note:
+            add_note.click()
+            # The note box renders a moment after the click; looking straight away missed it.
+            try: box = WebDriverWait(driver, 8).until(lambda d: pick_first_displayed(d.find_elements(By.XPATH, f"{scope}//textarea")))
+            except Exception: box = None
+            if box:
+                box.send_keys(note)
+                buffer(click_gap)
+                send = invite_button(scope, "send", exact=True) or invite_button(scope, "send invitation")
+                if send and send.is_enabled():
+                    send.click()
+                    buffer(click_gap)
+                    return "Sent with note"
+            # No text box: the free monthly note quota is used up and LinkedIn shows an upsell instead.
+            save_page_once("invite_after_add_note")
+        without_note = invite_button(scope, "send without")
+        if without_note:
+            without_note.click()
+            buffer(click_gap)
+            return "Sent without note (note quota used up or not offered)"
+        if "enter their email" in driver.page_source:
+            return "Skipped - they only accept requests from people who know their email"
+        return "Failed - could not find the Send button"
+    finally:
+        if in_frame: driver.switch_to.default_content()
+        actions.send_keys(Keys.ESCAPE).perform()
+
+
+def invite_button(scope: str, label: str, exact: bool = False) -> WebElement | None:
+    '''A visible button in the invite whose text or aria-label contains (or, if `exact`, is) `label`.'''
+    lower = "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'"
+    text, aria = f"translate(normalize-space(.), {lower})", f"translate(@aria-label, {lower})"
+    match = f"{text}='{label}' or {aria}='{label}'" if exact else f"contains({text}, '{label}') or contains({aria}, '{label}')"
+    return pick_first_displayed(driver.find_elements(By.XPATH, f"{scope}//button[{match}]"))
+
+
+def short_company_name(company: str) -> str:
+    '''"ZettaMine Labs Pvt. Ltd." -> "ZettaMine Labs", "Weekday AI (YC W21)" -> "Weekday AI": what people's cards say.'''
+    name = re.sub(r"\s*\(.*?\)", "", company)
+    name = re.sub(r"[\s,]+(pvt\.?|private|ltd\.?|limited|inc\.?|llc|llp|corp\.?|corporation|co\.)(?=\s|$)", "", name, flags=re.IGNORECASE)
+    return name.strip(" ,.") or company
+
+
+def find_employees(company: str, contacted: set[str], wanted: int) -> list[tuple[str, str]]:
+    '''People-search results whose card mentions `company`, as (name, profile link).'''
+    found = []
+    company = short_company_name(company)
+    for keyword in referral_role_keywords:
+        if len(found) >= wanted: break
+        driver.get(f"https://www.linkedin.com/search/results/people/?keywords={quote(f'{company} {keyword}')}")
+        buffer(3)
+        cards = driver.find_elements(By.XPATH, "//main//*[@role='listitem' or self::li][.//a[contains(@href, '/in/')]]")
+        print_lg(f'People search "{company} {keyword}": {len(cards)} result cards.')
+        if not cards: save_page_once("people_search_empty")
+        for card in cards:
+            if len(found) >= wanted: break
+            try:
+                if company.casefold() not in card.text.casefold(): continue
+                link = card.find_element(By.XPATH, ".//a[contains(@href, '/in/')]")
+                profile = link.get_attribute('href').split('?')[0].rstrip('/')
+                name = (link.text or card.text).split("\n")[0].strip()
+                name = re.sub(r"[\s\W]*\b(1st|2nd|3rd\+?)\s*$", "", name).strip()
+            except Exception:
+                continue
+            if profile in contacted or any(profile == f[1] for f in found): continue
+            found.append((name, profile))
+    return found
+
+
+def send_referral_requests() -> None:
+    '''For each company applied to: connect with the hiring manager and a few employees, with a referral note.'''
+    contacted, per_company, sent_today = load_referral_history()
+    for row in load_referral_targets():
+        if sent_today >= referral_daily_limit:
+            print_lg(f"Reached referral_daily_limit ({referral_daily_limit}) for today. Stopping.")
+            return
+        company, job_title = row['Company'].strip(), row['Title']
+        room = referrals_per_company - per_company.get(company, 0)
+        if room <= 0: continue
+        print_lg(f'\n>>>> Looking for referrals at "{company}" for "{job_title}" <<<<\n')
+        people = []
+        hr_link = (row.get('HR Link') or '').split('?')[0].rstrip('/')
+        if hr_link.startswith('http') and hr_link not in contacted:
+            people.append((row.get('HR Name') or '', hr_link, "Hiring team"))
+        if len(people) < room:
+            people += [(name, link, "People search") for name, link in find_employees(company, contacted, room - len(people))]
+        for name, profile, found_via in people[:room]:
+            if sent_today >= referral_daily_limit: break
+            their_first = name.split()[0] if name else ""
+            try:
+                driver.get(profile)
+                buffer(3)
+                action = send_connection_request(name, referral_note(their_first, job_title, company))
+            except Exception as e:
+                logger.warning("Referral request to %s failed: %s", profile, e)
+                action = f"Failed - {type(e).__name__}"
+            print_lg(f'{action}: {name} ({found_via}) at {company} - {profile}')
+            record_referral(company, job_title, name, profile, found_via, action)
+            contacted.add(profile)
+            if action.startswith("Sent"):
+                sent_today += 1
+                per_company[company] = per_company.get(company, 0) + 1
+            buffer(click_gap + 2)
+    print_lg(f"Referral requests done. {sent_today} sent today. Recorded in {referral_file_name}")
+
+
 def run(total_runs: int) -> int:
     if dailyEasyApplyLimitReached:
         return total_runs
@@ -1476,7 +1915,31 @@ def run(total_runs: int) -> int:
     print_lg(f"Date and Time: {datetime.now()}")
     print_lg(f"Cycle number: {total_runs}")
     print_lg(f"Currently looking for jobs posted within '{date_posted}' and sorting them by '{sort_by}'")
-    apply_to_jobs(search_terms)
+    global search_location
+    original_location = search_location
+    if company_mode:
+        target_list = load_target_companies()
+        if not target_list:
+            print_lg("'company_mode' is on and there is no company list yet: finding the companies hiring for your search terms first.")
+            survey_companies(search_terms)
+            target_list = load_target_companies()
+        if target_list:
+            print_lg(f"'company_mode' is on: visiting {len(target_list)} companies one by one, then searching by job title.")
+            # Visiting a company directly already shows every job it has open - restricting
+            # that further by city would only throw away real openings, so this sees all of
+            # them regardless of location (the job-title search below still respects it).
+            search_location = ""
+            apply_to_jobs(search_terms, by_companies=target_list)
+            search_location = original_location
+        else:
+            print_lg("'company_mode' is on but no companies were found. Searching by job title only.")
+        if dailyEasyApplyLimitReached: return total_runs + 1
+    for loc in locations_to_search():
+        search_location = loc
+        print_lg(f'\n==== Now searching location: "{loc}" ====\n')
+        apply_to_jobs(search_terms)
+        if dailyEasyApplyLimitReached: break
+    search_location = original_location
     print_lg("########################################################################################################################\n")
     # Only wait between cycles when there is actually going to be another cycle. This used
     # to run at the end of every single run, which reads as a 10 minute hang.
@@ -1514,8 +1977,25 @@ def main() -> None:
         if use_AI:
             aiClient = create_ai_client()
 
-        # Start applying to jobs
         driver.switch_to.window(linkedIn_tab)
+
+        if referral_mode:
+            print_lg("\n########################################################################################################################\n")
+            print_lg(f"Date and Time: {datetime.now()}")
+            print_lg(f"'referral_mode' is on: sending up to {referral_daily_limit} referral requests today. Nothing will be applied to.")
+            send_referral_requests()
+            print_lg("########################################################################################################################\n")
+            return
+
+        if survey_mode:
+            print_lg("\n########################################################################################################################\n")
+            print_lg(f"Date and Time: {datetime.now()}")
+            print_lg("'survey_mode' is on: scanning for companies with openings. Nothing will be applied to.")
+            survey_companies(search_terms)
+            print_lg("########################################################################################################################\n")
+            return
+
+        # Start applying to jobs
         total_runs = run(total_runs)
         while(run_non_stop):
             if cycle_date_posted:
@@ -1530,7 +2010,11 @@ def main() -> None:
             total_runs = run(total_runs)
             if dailyEasyApplyLimitReached:
                 break
-        
+
+        if send_referrals_after_applying:
+            print_lg("\n'send_referrals_after_applying' is on: asking for referrals at the companies applied to.\n")
+            send_referral_requests()
+
 
     except (NoSuchWindowException, WebDriverException) as e:
         logger.error("The browser window was closed or the session became invalid. Exiting.", exc_info=e)

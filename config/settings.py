@@ -85,6 +85,45 @@ stop_before_submit = False          # True or False, Note: True or False are cas
 # Run in safe mode. Set this true if chrome is taking too long to open or if you have multiple profiles in browser. This will open chrome in guest profile!
 safe_mode = True                    # True or False, Note: True or False are case-sensitive
 
+# Survey mode: scan search results and record which companies are posting jobs
+# (and whether LinkedIn shows them as actively hiring), WITHOUT applying to anything.
+# Use this first to see which companies have openings, then narrow `companies` in
+# config/search.py to the ones you want and turn this back off to actually apply.
+survey_mode = False                 # True or False, Note: True or False are case-sensitive
+
+# Where survey_mode writes its results.
+survey_file_name = "all excels/company_survey.csv"
+
+# How many result pages to read per search term when surveying. 0 reads them all (slow).
+survey_max_pages = 3                # Only numbers >= 0... Don't put in quotes
+
+
+# >>>>>>>>>>> Referral requests <<<<<<<<<<<
+# Referral mode: for each company you have actually applied to, send LinkedIn connection
+# requests with a short referral note to the job's hiring manager and a few employees.
+# Applies to nothing. LinkedIn restricts accounts that send too many requests, keep the limits low.
+referral_mode = False               # True or False, Note: True or False are case-sensitive
+
+# After every applying run, automatically send referral requests for the companies applied to
+# (same limits as referral_mode). One Start does both.
+send_referrals_after_applying = False   # True or False, Note: True or False are case-sensitive
+
+# Most connection requests to send in one day, across all runs.
+referral_daily_limit = 15           # Only numbers greater than 0... Don't put in quotes
+
+# Most people to contact per company (the hiring manager counts as one).
+referrals_per_company = 2           # Only numbers greater than 0... Don't put in quotes
+
+# Employees are found by searching "<company> <keyword>" for each of these, in order.
+referral_role_keywords = ["Developer", "Engineer", "Recruiter"]
+
+# The note sent with each request. LinkedIn allows 200 characters, longer notes are shortened.
+# Placeholders: {first_name} (theirs), {job_title}, {company}, {my_name}.
+referral_message = "Hi {first_name}, I just applied for the {job_title} role at {company}. Would you be open to referring me? Happy to share my resume. Thank you, {my_name}"
+
+# Where every request sent is recorded, so nobody is contacted twice.
+referral_file_name = "all excels/referrals_history.csv"
+
 # Do you want scrolling to be smooth or instantaneous? (Can reduce performance if True)
 smooth_scroll = False               # True or False, Note: True or False are case-sensitive
 
