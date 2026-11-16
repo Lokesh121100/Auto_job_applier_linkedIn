@@ -256,7 +256,8 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
 def test_jobs_search_url_includes_both_keywords_and_location(bot, monkeypatch):
     monkeypatch.setattr(bot, "search_location", "Singapore")
     url = bot.jobs_search_url("Power Platform Developer")
-    assert url == "https://www.linkedin.com/jobs/search/?keywords=Power%20Platform%20Developer&location=Singapore"
+    # The 2026-11 AI search page drops location=, so the location now rides in the query.
+    assert url == "https://www.linkedin.com/jobs/search-results/?keywords=Power%20Platform%20Developer%20in%20Singapore"
 
 
 def test_jobs_search_url_with_no_keywords_for_company_mode(bot, monkeypatch):
@@ -268,7 +269,7 @@ def test_jobs_search_url_with_no_keywords_for_company_mode(bot, monkeypatch):
 def test_jobs_search_url_omits_location_when_blank(bot, monkeypatch):
     monkeypatch.setattr(bot, "search_location", "")
     url = bot.jobs_search_url("Data Analyst")
-    assert url == "https://www.linkedin.com/jobs/search/?keywords=Data%20Analyst"
+    assert url == "https://www.linkedin.com/jobs/search-results/?keywords=Data%20Analyst"
     assert "location=" not in url
 
 

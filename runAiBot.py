@@ -47,6 +47,7 @@ from modules.open_chrome import *
 from modules.helpers import *
 from modules.clickers_and_finders import *
 from modules.validator import validate_config
+from modules.career_ops import check_job_fit
 
 if use_AI:
     from modules.ai.connections import create_ai_client, extract_skills, answer_question, close_ai_client
@@ -101,6 +102,11 @@ class UnansweredQuestions(Exception):
     Raised when required questions have no answer in `config/questions.py`. The job is
     skipped, not failed - there is nothing broken to retry, the user has to add answers.
     '''
+
+class BlacklistedCompanyFound(Exception):
+    '''Raised by `check_blacklist` only for a real bad-word hit in About Company. Kept apart from
+    ValueError because a missing page element also raises ValueError, and that is not a blacklist hit.'''
+
 
 class CompanyFilterFailed(Exception):
     '''
@@ -363,14 +369,86 @@ def get_page_info() -> tuple[WebElement | None, int | None]:
         pagination_element = try_find_by_classes(driver, ["jobs-search-pagination__pages", "artdeco-pagination", "artdeco-pagination__pages"])
         scroll_to_view(driver, pagination_element)
         # ".//" keeps this inside the pagination element; a leading "//" searches the whole document.
-        current_page = int(pagination_element.find_element(By.XPATH, ".//button[contains(@class, 'active')]").text)
+        return pagination_element, int(pagination_element.find_element(By.XPATH, ".//button[contains(@class, 'active')]").text)
+    except Exception as e:
+        old_layout_error = e
+    try:
+        # AI job search page: "Page N" buttons, the current one marked aria-current="true".
+        pagination_element = driver.find_element(By.XPATH, pagination_xpath)
+        scroll_to_view(driver, pagination_element)
+        label = pagination_element.find_element(By.XPATH, ".//button[@aria-current='true']").get_attribute("aria-label")
+        return pagination_element, int(label.split()[-1])
     except Exception as e:
         logger.warning("Failed to find Pagination element, hence couldn't scroll till end!")
-        pagination_element = None
-        current_page = None
-        print_lg(e)
-    return pagination_element, current_page
+        print_lg(old_layout_error, e)
+        return None, None
 
+
+
+# LinkedIn's "AI-powered job search" page (/jobs/search-results/, 2026-11) renders each job as a
+# role=button div keyed "job-card-component-ref-<id>" with randomized classes. The older layout's
+# <li data-occludable-job-id> is matched too, so either page works. See tests/fixtures/07_ai_job_search.html.
+NEW_CARD_KEY_PREFIX = "job-card-component-ref-"
+job_card_xpath = f"//li[@data-occludable-job-id] | //div[@role='button'][starts-with(@componentkey,'{NEW_CARD_KEY_PREFIX}')]"
+job_description_xpath = "//h2[normalize-space()='About the job']/following::*[@data-testid='expandable-text-box'][1]"
+pagination_xpath = ("//button[starts-with(@data-testid,'pagination-indicator-')]"
+                    "/ancestor::*[count(.//button[starts-with(@data-testid,'pagination-indicator-')]) > 1][1]")
+
+
+def card_job_id(card: WebElement) -> str | None:
+    old_id = card.get_dom_attribute('data-occludable-job-id')
+    if old_id: return old_id
+    key = card.get_dom_attribute('componentkey') or ''
+    return key[len(NEW_CARD_KEY_PREFIX):] if key.startswith(NEW_CARD_KEY_PREFIX) else None
+
+
+def card_xpath_for_id(job_id: str) -> str:
+    return f"//li[@data-occludable-job-id='{job_id}'] | //div[@role='button'][@componentkey='{NEW_CARD_KEY_PREFIX}{job_id}']"
+
+
+def split_location(work_location: str) -> tuple[str, str]:
+    '''"Chennai, India (Hybrid)" -> ("Chennai, India", "Hybrid").'''
+    if '(' in work_location and ')' in work_location:
+        return work_location[:work_location.rfind('(')].strip(), work_location[work_location.rfind('(')+1:work_location.rfind(')')]
+    return work_location, "Unknown"
+
+
+def get_ai_search_card_details(job: WebElement, blacklisted_companies: set, rejected_jobs: set) -> tuple[str, str, str, str, str, bool]:
+    '''A card on the AI job search page: its <p> texts are title, company, location, then status lines
+    such as "Viewed", "Saved" or "Applied".'''
+    lines = [p.text.strip() for p in job.find_elements(By.XPATH, ".//p") if p.text.strip()]
+    job_id = card_job_id(job)
+    # The title <p> can read "<title> (Verified job)\n<title>": keep the first line, drop the badge.
+    title = (lines[0] if lines else "Unknown").split("\n")[0].strip()
+    title = title.removesuffix("(Verified job)").removesuffix(" with verification").strip()
+    company = lines[1] if len(lines) > 1 else "Unknown"
+    work_location, work_style = split_location(lines[2] if len(lines) > 2 else "Unknown")
+    skip = True
+    if company in blacklisted_companies:
+        print_lg(f'Skipping "{title} | {company}" job (Blacklisted Company). Job ID: {job_id}!')
+    elif job_id in rejected_jobs:
+        print_lg(f'Skipping previously rejected "{title} | {company}" job. Job ID: {job_id}!')
+    elif "Applied" in lines[3:]:
+        print_lg(f'Already applied to "{title} | {company}" job. Job ID: {job_id}!')
+    else:
+        skip = False
+        scroll_to_view(driver, job, True)
+        job.click()
+        buffer(click_gap)
+    return job_id, title, company, work_location, work_style, skip
+
+
+def read_job_description_text() -> str:
+    '''Full description text from whichever layout is showing. The AI search page clamps it
+    behind a "more" button, so textContent is read rather than the visible .text.'''
+    try:
+        found = WebDriverWait(driver, 6).until(lambda d: d.find_elements(By.XPATH, job_description_xpath)
+                                                         or d.find_elements(By.CLASS_NAME, "jobs-box__html-content"))
+        if found[0].get_dom_attribute("data-testid") == "expandable-text-box":
+            return found[0].get_attribute("textContent").strip()
+    except Exception:
+        pass
+    return find_by_class(driver, "jobs-box__html-content").text
 
 
 def get_job_main_details(job: WebElement, blacklisted_companies: set, rejected_jobs: set) -> tuple[str, str, str, str, str, bool]:
@@ -384,11 +462,21 @@ def get_job_main_details(job: WebElement, blacklisted_companies: set, rejected_j
     * work_style: Work style of this job (Remote, On-site, Hybrid)
     * skip: A boolean flag to skip this job
     '''
+    if (job.get_dom_attribute('componentkey') or '').startswith(NEW_CARD_KEY_PREFIX):
+        return get_ai_search_card_details(job, blacklisted_companies, rejected_jobs)
     skip = False
     # Every class on a job card that carried data is now a rotating random string, so anchor
     # on the artdeco lockup structure instead. The title link is no longer the card's first
     # <a> in every layout either, so address it through the lockup title too.
-    job_details_button = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a")
+    # LinkedIn lazily renders cards as they scroll into view, so a card can exist in the DOM
+    # (and already be in `job_listings`) before its title link has actually rendered - an
+    # instant find_element here was losing a lot of real jobs to that race. A short, scoped
+    # wait on this one card fixes it without slowing down cards that are already ready.
+    try:
+        job_details_button = WebDriverWait(job, 3).until(
+            lambda j: j.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a"))
+    except TimeoutException:
+        job_details_button = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__title')]//a")
     scroll_to_view(driver, job_details_button, True)
     job_id = job.get_dom_attribute('data-occludable-job-id')
     # aria-label is the whole title; .text of the link also drags in the verified-badge node,
@@ -569,7 +657,7 @@ def check_blacklist(rejected_jobs: set, job_id: str, company: str, blacklisted_c
         if word:
             rejected_jobs.add(job_id)
             blacklisted_companies.add(company)
-            raise ValueError(f'\n"{about_company_org}"\n\nContains "{word}".')
+            raise BlacklistedCompanyFound(f'\n"{about_company_org}"\n\nContains "{word}".')
     buffer(click_gap)
     scroll_to_view(driver, jobs_top_card)
     return rejected_jobs, blacklisted_companies, jobs_top_card
@@ -614,7 +702,7 @@ def get_job_description(
     skipMessage = None
     try:
         found_masters = 0
-        jobDescription = find_by_class(driver, "jobs-box__html-content").text
+        jobDescription = read_job_description_text()
         jobDescriptionLow = jobDescription.lower()
         bad_word = find_bad_word(jobDescription, bad_words)
         if bad_word:
@@ -1061,8 +1149,24 @@ easy_apply_locators = [
     ("in-app apply URL flag", ".//a[contains(@href, 'openSDUIApplyFlow=true')]"),
     ("aria-label", ".//button[contains(@class,'jobs-apply-button') and contains(@aria-label, 'Easy Apply')]"),
     ("button label", ".//button[contains(@class,'jobs-apply-button')][.//span[contains(normalize-space(.), 'Easy Apply')]]"),
+    # AI job search page: no stable classes, only aria-labels; skip the "Filter by Easy Apply" pill.
+    # The control is a <button> on some jobs and an <a target="_blank"> on others (both seen live).
+    ("AI search Easy Apply", "//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails']"
+                             "//*[self::a or self::button][contains(@aria-label,'Easy Apply') and not(contains(@aria-label,'Filter'))]"),
+    ("AI search company website", "//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails']"
+                                  "//*[self::a or self::button][@aria-label='Apply on company website']"),
     ("apply button", apply_button_xpath),
 ]
+
+
+def wait_for_apply_control(timeout: float = 6) -> bool:
+    '''The AI search page can render the job description before its apply button, so an
+    instant check misses the button and the job ends in "Failed to apply!".'''
+    end = time.time() + timeout
+    while time.time() < end:
+        if any(driver.find_elements(By.XPATH, xp) for _, xp in easy_apply_locators): return True
+        time.sleep(0.5)
+    return False
 
 
 def follow_company(modal: WebDriver = driver) -> None:
@@ -1210,11 +1314,30 @@ def jobs_search_url(keywords: str = "") -> str:
     still honours it directly, so this is now the reliable way to set it; `set_search_location()`
     is kept as a secondary attempt in case LinkedIn ever restores an on-page location field.
     '''
+    location = search_location.strip()
+    if keywords:
+        # The 2026-11 AI job search page drops `location=` when it redirects, but honours a
+        # location written into the query itself ("X in Chennai" -> only Chennai jobs).
+        query = keywords
+        if location.lower() == "remote": query += " remote"
+        elif location: query += f" in {location}"
+        return f"https://www.linkedin.com/jobs/search-results/?keywords={quote(query)}"
+    # Company mode (no keywords) still relies on the old page's Company filter.
     url = "https://www.linkedin.com/jobs/search/"
-    params = []
-    if keywords: params.append(f"keywords={quote(keywords)}")
-    if search_location.strip(): params.append(f"location={quote(search_location.strip())}")
-    return url + ("?" + "&".join(params) if params else "")
+    return url + (f"?location={quote(location)}" if location else "")
+
+
+def wait_for_job_cards(timeout: float = 25) -> list:
+    '''Job cards once the results have settled. The old search page can show cards for a moment
+    before redirecting to the AI search page, so cards must still be there 2 seconds later.'''
+    end = time.time() + timeout
+    while time.time() < end:
+        if driver.find_elements(By.XPATH, job_card_xpath):
+            time.sleep(2)
+            cards = driver.find_elements(By.XPATH, job_card_xpath)
+            if cards: return cards
+        time.sleep(1)
+    return []
 
 
 # Function to apply to jobs
@@ -1255,9 +1378,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                 # subclass, so without this a search with genuinely zero results (easy to hit on
                 # a smaller market like Singapore) or just a slow-loading page was caught by the
                 # "browser crashed" handler below and killed the WHOLE run, not just this term.
-                try:
-                    wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
-                except TimeoutException:
+                if not wait_for_job_cards():
                     print_lg(f'No job listings loaded for "{searchTerm}" - either zero results for this search, '
                              f"or the page loaded slowly. Moving on.")
                     break
@@ -1271,7 +1392,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                     # LinkedIn virtualises this list: off-screen <li>s aren't in the DOM yet and
                     # rendered ones go stale as we scroll, so a single snapshot only ever gets
                     # one screenful. Re-query each time instead of holding that snapshot.
-                    job_listings = driver.find_elements(By.XPATH, "//li[@data-occludable-job-id]")
+                    job_listings = driver.find_elements(By.XPATH, job_card_xpath)
                     if job_index >= len(job_listings): break
                     job = job_listings[job_index]
                     job_index += 1
@@ -1279,15 +1400,44 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                     if current_count >= switch_number: break
                     print_lg("\n-@-\n")
 
+                    # LinkedIn only renders a card's content once it's scrolled into view - an
+                    # off-screen one is a bare empty <li>, confirmed by dumping one (see
+                    # debug_unreadable_job_card.html): just an HTML comment, no title, nothing to
+                    # wait for. A single scroll-and-read attempt still mostly failed, because the
+                    # `job` reference itself routinely went stale between the scroll and the read
+                    # (LinkedIn swaps these nodes out constantly) - the scroll was silently
+                    # swallowed by its own try/except, so nothing had actually been scrolled.
+                    # Re-fetching the card fresh by its stable id on every attempt fixes that.
+                    occludable_id = card_job_id(job)
+                    job_id = title = company = work_location = work_style = None
+                    skip = False
+                    last_error: Exception | None = None
+                    for attempt in range(3):
+                        try:
+                            if attempt > 0 and occludable_id:
+                                job = driver.find_element(By.XPATH, card_xpath_for_id(occludable_id))
+                            scroll_to_view(driver, job)
+                            buffer(1 + attempt)
+                            job_id,title,company,work_location,work_style,skip = get_job_main_details(job, blacklisted_companies, rejected_jobs)
+                            last_error = None
+                            break
+                        except (NoSuchElementException, StaleElementReferenceException) as e:
+                            last_error = e
+                            continue
+
                     # NoSuchElementException/StaleElementReferenceException are ordinary scrape
-                    # glitches (LinkedIn virtualises and re-renders this list while scrolling) -
-                    # NoSuchElementException is actually a WebDriverException subclass, so without
-                    # this it was caught by the "browser crashed" handler below and killed the
-                    # whole run over a single bad card instead of just skipping that one job.
-                    try:
-                        job_id,title,company,work_location,work_style,skip = get_job_main_details(job, blacklisted_companies, rejected_jobs)
-                    except (NoSuchElementException, StaleElementReferenceException) as e:
-                        logger.warning("Couldn't read this job card, skipping it. %s", type(e).__name__)
+                    # glitches - NoSuchElementException is actually a WebDriverException subclass,
+                    # so without this it was caught by the "browser crashed" handler below and
+                    # killed the whole run over a single bad card instead of just skipping it.
+                    if last_error is not None:
+                        logger.warning("Couldn't read this job card after 3 tries, skipping it. %s", type(last_error).__name__)
+                        if "unreadable_job_card" not in referral_pages_saved:
+                            referral_pages_saved.add("unreadable_job_card")
+                            try:
+                                with open(os.path.join(logs_folder_path, "debug_unreadable_job_card.html"), "w", encoding="utf-8") as f:
+                                    f.write(job.get_attribute("outerHTML") or "<empty>")
+                            except Exception as dump_err:
+                                logger.warning("Could not dump the unreadable card: %s", dump_err)
                         skip_count += 1
                         continue
 
@@ -1326,9 +1476,10 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                     questions_list = None
                     screenshot_name = "Not Available"
 
+                    jobs_top_card = None    # absent on the AI search page; only the posted date reads it
                     try:
                         rejected_jobs, blacklisted_companies, jobs_top_card = check_blacklist(rejected_jobs,job_id,company,blacklisted_companies)
-                    except ValueError as e:
+                    except BlacklistedCompanyFound as e:
                         print_lg(e, 'Skipping this job!\n')
                         failed_job(job_id, job_link, resume, date_listed, "Found Blacklisted words in About Company", e, "Skipped", screenshot_name)
                         skip_count += 1
@@ -1387,7 +1538,15 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                         skip_count += 1
                         continue
 
-                    
+                    fit_skip = check_job_fit(description)
+                    if fit_skip:
+                        print_lg(fit_skip)
+                        failed_job(job_id, job_link, resume, date_listed, "Low Career-Ops match", fit_skip, "Skipped", screenshot_name)
+                        rejected_jobs.add(job_id)
+                        skip_count += 1
+                        continue
+
+
                     if use_AI and description != "Unknown":
                         try:
                             skills = extract_skills(aiClient, description)
@@ -1400,6 +1559,8 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                     # Is this an Easy Apply job? Try each locator in `easy_apply_locators` in
                     # turn and confirm by the modal opening; a new browser tab means external.
                     is_easy_apply = False
+                    external_link_found = None
+                    wait_for_apply_control()
                     for how, xpath in easy_apply_locators:
                         apply_button = try_xp(driver, xpath, False)  # detect only, never click
                         if not apply_button: continue
@@ -1408,8 +1569,14 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                             apply_button.click()
                             buffer(click_gap)
                             if len(driver.window_handles) > tabs_open:
-                                # A new tab opened -> external apply. Close it and return to LinkedIn.
+                                # A new tab opened -> external apply. Capture its link before
+                                # closing it. external_apply() used to run unconditionally right
+                                # after this and click Apply a SECOND time on a page whose state
+                                # this click already changed - usually harmless, but it could
+                                # stall the whole run waiting on a "Continue" step that was never
+                                # coming back, since nothing here was still waiting to show it.
                                 driver.switch_to.window(driver.window_handles[-1])
+                                external_link_found = driver.current_url
                                 if close_tabs and driver.current_window_handle != linkedIn_tab:
                                     driver.close()
                                 driver.switch_to.window(linkedIn_tab)
@@ -1519,6 +1686,10 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                         except UnansweredQuestions as e:
                             print_lg(str(e))
                             print_lg("Add those answers to config/questions.py and re-run to apply to this job.")
+                            # Was silently dropped here before - not saved anywhere, so there was
+                            # no way to find this job again later. Now recorded alongside every
+                            # other failed/skipped job, with the unanswered question as the reason.
+                            failed_job(job_id, job_link, resume, date_listed, str(e), "", application_link, screenshot_name)
                             skip_count += 1
                             discard_job()
                             continue
@@ -1531,8 +1702,19 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                             failed_count += 1
                             discard_job()
                             continue
+                    elif external_link_found is not None:
+                        # Case 2a: already detected as external above - the link is in hand,
+                        # don't click Apply again to re-discover what's already known.
+                        if easy_apply_only:
+                            print_lg("Not an Easy Apply job (easy_apply_only is on), skipping it.")
+                            skip_count += 1
+                            continue
+                        application_link = external_link_found
+                        print_lg('Got the external application link "{}"'.format(application_link))
                     else:
-                        # Case 2: Apply externally
+                        # Case 2b: none of the locators above even found a button to click -
+                        # fall back to the original click-and-detect flow.
+                        save_page_once("no_apply_button_matched")
                         skip, application_link, tabs_count = external_apply(pagination_element, job_id, job_link, resume, date_listed, application_link, screenshot_name)
                         if dailyEasyApplyLimitReached:
                             print_lg("\n###############  Daily application limit for Easy Apply is reached!  ###############\n")
@@ -1614,10 +1796,10 @@ def survey_companies(search_terms: list[str]) -> None:
             apply_filters()
             try:
                 while True:
-                    wait.until(EC.presence_of_all_elements_located((By.XPATH, "//li[@data-occludable-job-id]")))
+                    wait.until(EC.presence_of_all_elements_located((By.XPATH, job_card_xpath)))
                     pagination_element, current_page = get_page_info()
                     buffer(3)
-                    job_listings = driver.find_elements(By.XPATH, "//li[@data-occludable-job-id]")
+                    job_listings = driver.find_elements(By.XPATH, job_card_xpath)
                     for job in job_listings:
                         try:
                             company = job.find_element(By.XPATH, ".//div[contains(@class,'artdeco-entity-lockup__subtitle')]").text.strip()
