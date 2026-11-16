@@ -34,11 +34,13 @@ from selenium.common.exceptions import (
 )
 
 from config.personals import first_name, last_name
-from config.search import search_terms, search_location
+from config.search import search_terms, search_location, search_locations
 from config.naukri import naukri_username, naukri_password, naukri_max_applications, naukri_pages_per_keyword
+from config.settings import logs_folder_path
 
 from modules.open_chrome import driver, wait, actions
 from modules.helpers import print_lg, logger, critical_error_log, buffer, truncate_for_csv
+from modules.career_ops import check_job_fit
 
 naukri_file_name = "all excels/naukri_applied_history.csv"
 naukri_fields = ['Date Applied', 'Title', 'Company', 'Status', 'Job Link']
@@ -74,27 +76,72 @@ def login_naukri() -> bool:
     login is reported cleanly rather than crashing the run.'''
     print_lg("Logging in to Naukri.com...")
     driver.get("https://www.naukri.com/nlogin/login")
+    buffer(2)
     try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "usernameField")))
+        # presence_of_element_located only confirms the element exists in the DOM, not that
+        # it's actually ready to be typed into - caught it mid-render (a cookie banner or
+        # page animation still over it) and send_keys failed with ElementNotInteractable.
+        # element_to_be_clickable waits for visible AND enabled, which is what typing needs.
+        username_field = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.ID, "usernameField")))
+        password_field = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.ID, "passwordField")))
+        username_field.send_keys(naukri_username)
+        password_field.send_keys(naukri_password)
+        password_field.send_keys(Keys.ENTER)
     except TimeoutException:
+        # Already logged in (session redirected to homepage)
+        if "homepage" in driver.current_url.lower() or "mynaukri" in driver.current_url.lower():
+            print_lg("Already logged in to Naukri.")
+            return True
         logger.error("Naukri's login page didn't load as expected. Naukri may have changed its login page.")
+        logger.error("Page title: %s, URL: %s", driver.title, driver.current_url)
         return False
-    driver.find_element(By.ID, "usernameField").send_keys(naukri_username)
-    password_field = driver.find_element(By.ID, "passwordField")
-    password_field.send_keys(naukri_password)
-    password_field.send_keys(Keys.ENTER)
+    except StaleElementReferenceException:
+        # Element became stale mid-check, retry page load
+        logger.warning("Stale element during login - retrying...")
+        buffer(1)
+        driver.get("https://www.naukri.com/nlogin/login")
+        buffer(2)
+        try:
+            username_field = driver.find_element(By.ID, "usernameField")
+            password_field = driver.find_element(By.ID, "passwordField")
+            username_field.send_keys(naukri_username)
+            password_field.send_keys(naukri_password)
+            password_field.send_keys(Keys.ENTER)
+            buffer(5)
+            if "login" not in driver.current_url.lower():
+                print_lg("Logged in to Naukri after retry.")
+                return True
+        except Exception:
+            logger.error("Login retry failed.")
+            return False
+        return False
+    except WebDriverException as e:
+        logger.error("Could not fill in the Naukri login form.", exc_info=e)
+        return False
     buffer(5)
     if "login" in driver.current_url.lower():
         logger.error("Naukri login didn't go through - check naukri_username/naukri_password in the Naukri tab.")
+        logger.error("Still on: %s", driver.current_url)
+        try:
+            error_text = driver.find_element(By.XPATH, "//*[contains(@class,'error') or contains(@class,'Error')]").text
+            if error_text: logger.error("Page shows: %s", error_text)
+        except Exception:
+            pass
+        try:
+            with open(os.path.join(logs_folder_path, "debug_naukri_login_failed.html"), "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        except Exception as dump_err:
+            logger.warning("Could not save the failed-login page: %s", dump_err)
         return False
     print_lg("Logged in to Naukri.")
     return True
 
 
-def build_search_url(keyword: str, page: int) -> str:
+def build_search_url(keyword: str, page: int, location: str | None = None) -> str:
     slug = keyword.strip().lower().replace(' ', '-')
-    if search_location:
-        location_slug = search_location.strip().lower().replace(' ', '-')
+    location = search_location if location is None else location
+    if location:
+        location_slug = location.strip().lower().replace(' ', '-')
         base = f"https://www.naukri.com/{slug}-jobs-in-{location_slug}"
     else:
         base = f"https://www.naukri.com/{slug}-jobs"
@@ -123,6 +170,23 @@ def collect_job_cards() -> list[dict]:
             pass
         jobs.append({"title": title, "company": company, "link": link})
     return jobs
+
+
+# Matches Naukri's current "styles_job-desc-container__..." section and the older "job-desc" div.
+job_description_xpath = "//*[contains(@class,'job-desc')]"
+
+
+def read_job_description() -> str:
+    '''Text of the open job page's description, or "" if it never shows up (the job is then applied to unscored).'''
+    for _ in range(3):
+        try:
+            texts = [el.text for el in driver.find_elements(By.XPATH, job_description_xpath)]
+        except StaleElementReferenceException:
+            texts = []
+        text = max(texts, key=len, default="").strip()
+        if text: return text
+        buffer(1)
+    return ""
 
 
 def quota_exceeded() -> bool:
@@ -156,7 +220,10 @@ def apply_to_current_job() -> str:
     clicked = False
     for xp in apply_button_xpaths:
         try:
-            WebDriverWait(driver, 4).until(EC.element_to_be_clickable((By.XPATH, xp))).click()
+            button = WebDriverWait(driver, 4).until(EC.element_to_be_clickable((By.XPATH, xp)))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+            buffer(0.5)
+            button.click()
             clicked = True
             break
         except (TimeoutException, NoSuchElementException):
@@ -186,7 +253,10 @@ def apply_to_current_job() -> str:
     except NoSuchElementException:
         pass
     try:
-        driver.find_element(By.XPATH, "//*[normalize-space(.)='Submit and Apply']").click()
+        submit_btn = driver.find_element(By.XPATH, "//*[normalize-space(.)='Submit and Apply']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
+        buffer(0.5)
+        submit_btn.click()
         buffer(2)
         return "Applied (Naukri form)"
     except NoSuchElementException:
@@ -209,12 +279,13 @@ def run() -> None:
     recorded_links = get_recorded_naukri_links()
     applied_count = 0
 
-    for keyword in search_terms:
+    searches = [(keyword, location) for keyword in search_terms for location in (search_locations or [search_location])]
+    for keyword, location in searches:
         if applied_count >= naukri_max_applications: break
         for page in range(1, naukri_pages_per_keyword + 1):
             if applied_count >= naukri_max_applications: break
-            url = build_search_url(keyword, page)
-            print_lg(f'\n>>>> Naukri: searching "{keyword}" (page {page}) <<<<\n')
+            url = build_search_url(keyword, page, location)
+            print_lg(f'\n>>>> Naukri: searching "{keyword}" in "{location or "anywhere"}" (page {page}) <<<<\n')
             try:
                 driver.get(url)
             except (NoSuchWindowException, WebDriverException) as e:
@@ -235,7 +306,8 @@ def run() -> None:
                 print_lg(f'Visiting "{job["title"]} | {job["company"] or "Unknown company"}"')
                 try:
                     driver.get(job["link"])
-                    status = apply_to_current_job()
+                    fit_skip = check_job_fit(read_job_description())
+                    status = f"Skipped - {fit_skip}" if fit_skip else apply_to_current_job()
                 except (NoSuchWindowException, WebDriverException) as e:
                     logger.error("Browser closed or became invalid. Stopping Naukri run.", exc_info=e)
                     return

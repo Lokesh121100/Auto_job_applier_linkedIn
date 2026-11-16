@@ -124,6 +124,28 @@ referral_message = "Hi {first_name}, I just applied for the {job_title} role at 
 # Where every request sent is recorded, so nobody is contacted twice.
 referral_file_name = "all excels/referrals_history.csv"
 
+# >>>>>>>>>>> Career-Ops job scoring <<<<<<<<<<<
+# Before applying, score how well each job description matches your resume using
+# Career-Ops (github.com/career-ops-hq/career-ops, run `npx @santifer/career-ops init`),
+# and skip jobs below `career_ops_min_score`. Works for both LinkedIn and Naukri.
+# If Node, the Career-Ops folder or the resume text is missing, jobs are NOT skipped.
+career_ops_scoring = True           # True or False, Note: True or False are case-sensitive
+
+# Lowest match % (keywords in the job description that also appear in your resume) to still apply.
+career_ops_min_score = 40           # 0 to 100... Don't put in quotes
+
+# Folder where Career-Ops was installed. Leave "" for ~/.gemini/antigravity/scratch/career-ops-workspace
+career_ops_path = ""
+
+# Your resume as plain text (Career-Ops can't read PDFs). Regenerate it whenever your resume changes.
+career_ops_cv_path = "all resumes/default/resume.md"
+
+# Skills Career-Ops' built-in list doesn't recognise. Each one found in a job description
+# counts towards the score, and is matched ignoring case and spaces ("PowerApps" = "Power Apps").
+career_ops_extra_skills = ["Power Apps", "Power Automate", "Power Platform", "Power Fx", "Dataverse",
+                           "SharePoint", "SPFx", "Copilot Studio", "Dynamics 365", "Power Pages",
+                           "Microsoft Purview", "Entra ID", "PCF", "Selenium", "Flask"]
+
 # Do you want scrolling to be smooth or instantaneous? (Can reduce performance if True)
 smooth_scroll = False               # True or False, Note: True or False are case-sensitive
 

@@ -95,3 +95,71 @@ def test_record_naukri_truncates_oversized_fields(naukri, tmp_path, monkeypatch)
 def test_naukri_run_settings_are_always_defined(naukri):
     assert isinstance(naukri.naukri_max_applications, int) and naukri.naukri_max_applications > 0
     assert isinstance(naukri.naukri_pages_per_keyword, int) and naukri.naukri_pages_per_keyword > 0
+
+
+# ------------------------------- Career-Ops fit check ----------------------------------
+class TextDriver:
+    '''Answers find_elements with elements carrying `.text`, for every XPath in `texts`.'''
+
+    def __init__(self, texts):
+        self.texts = texts
+        self.visited = []
+
+    def find_elements(self, by, xpath):
+        return [types.SimpleNamespace(text=t) for t in self.texts.get(xpath, [])]
+
+    def get(self, url):
+        self.visited.append(url)
+
+
+def test_read_job_description_takes_the_jd_section(naukri, monkeypatch):
+    monkeypatch.setattr(naukri, "driver", TextDriver({naukri.job_description_xpath: ["Need Power Apps and Dataverse"]}))
+    monkeypatch.setattr(naukri, "buffer", lambda *a: None)
+    assert naukri.read_job_description() == "Need Power Apps and Dataverse"
+
+
+def test_read_job_description_empty_when_page_has_none(naukri, monkeypatch):
+    monkeypatch.setattr(naukri, "driver", TextDriver({}))
+    monkeypatch.setattr(naukri, "buffer", lambda *a: None)
+    assert naukri.read_job_description() == ""
+
+
+@pytest.fixture
+def one_job_run(naukri, monkeypatch):
+    '''run() over a single job card, recording what gets written instead of touching a browser.'''
+    job = {"title": "Java Developer", "company": "Acme", "link": "https://www.naukri.com/job-listings-9"}
+    recorded = []
+    monkeypatch.setattr(naukri, "driver", TextDriver({naukri.job_description_xpath: ["Java, Spring, Kafka"]}))
+    monkeypatch.setattr(naukri, "login_naukri", lambda: True)
+    monkeypatch.setattr(naukri, "search_terms", ["Java Developer"])
+    monkeypatch.setattr(naukri, "naukri_pages_per_keyword", 1)
+    monkeypatch.setattr(naukri, "get_recorded_naukri_links", set)
+    monkeypatch.setattr(naukri, "collect_job_cards", lambda: [job])
+    monkeypatch.setattr(naukri, "buffer", lambda *a: None)
+    monkeypatch.setattr(naukri, "record_naukri", lambda *row: recorded.append(row))
+    return recorded
+
+
+def test_low_match_job_is_recorded_as_skipped_without_applying(naukri, monkeypatch, one_job_run):
+    monkeypatch.setattr(naukri, "check_job_fit", lambda description: "Career-Ops match 10% is below 40%")
+    monkeypatch.setattr(naukri, "apply_to_current_job", lambda: pytest.fail("applied to a low-match job"))
+    naukri.run()
+    assert one_job_run[0][2] == "Skipped - Career-Ops match 10% is below 40%"
+
+
+def test_run_searches_every_location(naukri, monkeypatch, one_job_run):
+    monkeypatch.setattr(naukri, "search_locations", ["Chennai", "Bengaluru"])
+    monkeypatch.setattr(naukri, "check_job_fit", lambda description: None)
+    monkeypatch.setattr(naukri, "apply_to_current_job", lambda: "Applied (Naukri form)")
+    naukri.run()
+    assert "https://www.naukri.com/java-developer-jobs-in-chennai" in naukri.driver.visited
+    assert "https://www.naukri.com/java-developer-jobs-in-bengaluru" in naukri.driver.visited
+
+
+def test_good_match_job_is_applied_with_its_description_scored(naukri, monkeypatch, one_job_run):
+    scored = []
+    monkeypatch.setattr(naukri, "check_job_fit", lambda description: scored.append(description))
+    monkeypatch.setattr(naukri, "apply_to_current_job", lambda: "Applied (Naukri form)")
+    naukri.run()
+    assert scored == ["Java, Spring, Kafka"]
+    assert one_job_run[0][2] == "Applied (Naukri form)"
