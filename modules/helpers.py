@@ -57,15 +57,22 @@ def get_default_temp_profile() -> str:
     '''
     Absolute path of the throwaway Chrome profile folder, created if it doesn't exist.
     Returns a **bare path** - callers add the `--user-data-dir=` flag themselves.
+
+    Scoped per entry script (runAiBot vs runNaukriBot) via a subfolder, so running both
+    bots at the same time doesn't point two Chrome instances at one locked profile
+    directory - that collision surfaced as a bare, unhelpful "session not created: cannot
+    connect to chrome", nothing about the real cause. Re-running the SAME bot still reuses
+    its own folder as before, so its login/session state still persists across runs.
     '''
     # Thanks to https://github.com/vinodbavage31 for suggestion!
     home = pathlib.Path.home()
+    bot_name = pathlib.Path(sys.argv[0]).stem or "bot"
     if sys.platform.startswith('win'):
-        path = pathlib.Path("C:\\temp\\auto-job-apply-profile")
+        path = pathlib.Path("C:\\temp\\auto-job-apply-profile") / bot_name
     elif sys.platform.startswith('linux'):
-        path = home / ".auto-job-apply-profile"
+        path = home / ".auto-job-apply-profile" / bot_name
     else:
-        path = home / "Library" / "Application Support" / "Google" / "Chrome" / "auto-job-apply-profile"
+        path = home / "Library" / "Application Support" / "Google" / "Chrome" / "auto-job-apply-profile" / bot_name
     try:
         # A missing parent is the other cause of "Chrome cannot read and write to its data directory".
         path.mkdir(parents=True, exist_ok=True)

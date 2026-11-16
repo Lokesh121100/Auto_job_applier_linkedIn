@@ -38,7 +38,20 @@ def test_temp_profile_is_a_bare_path_on_every_platform(monkeypatch, fake_home, p
 
 def test_temp_profile_is_usable_as_a_chrome_flag(monkeypatch, fake_home):
     monkeypatch.setattr(sys, "platform", "win32")
-    assert f"--user-data-dir={get_default_temp_profile()}" == "--user-data-dir=C:\\temp\\auto-job-apply-profile"
+    monkeypatch.setattr(sys, "argv", ["runAiBot.py"])
+    assert f"--user-data-dir={get_default_temp_profile()}" == "--user-data-dir=C:\\temp\\auto-job-apply-profile\\runAiBot"
+
+
+def test_temp_profile_is_scoped_per_entry_script(monkeypatch, fake_home):
+    '''Two bots running at once must never share one Chrome profile directory - Chrome
+    locks it to a single running instance, and the second one fails with an opaque
+    "session not created: cannot connect to chrome", nothing pointing at the real cause.'''
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "argv", ["runAiBot.py"])
+    linkedin_path = get_default_temp_profile()
+    monkeypatch.setattr(sys, "argv", ["runNaukriBot.py"])
+    naukri_path = get_default_temp_profile()
+    assert linkedin_path != naukri_path
 
 
 def test_temp_profile_directory_gets_created(monkeypatch, tmp_path):

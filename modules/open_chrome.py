@@ -60,7 +60,20 @@ def get_managed_driver_path() -> str | None:
         # UC rewrites the driver in place, so never hand it the shared ~/.cache/selenium
         # copy that other tools use. Work on our own copy, in UC's own data dir.
         os.makedirs(uc.Patcher.data_path, exist_ok=True)
-        target = os.path.join(uc.Patcher.data_path, "chromedriver")
+        # Windows needs the .exe suffix - without it, UC's own Patcher looks for
+        # "...\chromedriver.exe", doesn't find the extensionless copy sitting right next to
+        # it, and raises FileNotFoundError. That silently sent every Windows run through the
+        # except below into UC's own "latest" download instead of the version Selenium
+        # Manager had just correctly matched to the installed Chrome - which is exactly how a
+        # driver newer than the installed browser got picked when upstream's "latest" moved
+        # ahead of this machine's Chrome.
+        # The filename also carries the entry script's name (runAiBot vs runNaukriBot) so two
+        # bots running at once never copy/patch the same file underneath each other - that
+        # collision surfaced as "PermissionError: ...chromedriver.exe" when one bot's Chrome
+        # still had the shared file open while the other tried to overwrite it.
+        bot_name = os.path.splitext(os.path.basename(sys.argv[0]))[0] or "bot"
+        driver_filename = f"chromedriver_{bot_name}" + (".exe" if sys.platform == "win32" else "")
+        target = os.path.join(uc.Patcher.data_path, driver_filename)
         shutil.copy2(source, target)                    # fresh copy each run, so it can never go stale against a Chrome update
         uc.Patcher(executable_path=target).auto()       # applies UC's cdc_ patch in place
         _adhoc_sign(target)                             # ...which breaks the code signature, hence the re-sign, in this order
