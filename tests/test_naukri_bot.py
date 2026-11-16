@@ -97,6 +97,51 @@ def test_naukri_run_settings_are_always_defined(naukri):
     assert isinstance(naukri.naukri_pages_per_keyword, int) and naukri.naukri_pages_per_keyword > 0
 
 
+# ------------------------------- login field filling ----------------------------------
+class LoginField:
+    '''A login input. `sticks=False` models Naukri wiping what was typed while its page loads.'''
+
+    def __init__(self, sticks):
+        self.value, self.sticks = "", sticks
+
+    def clear(self):
+        self.value = ""
+
+    def send_keys(self, text):
+        if self.sticks: self.value += text
+
+    def get_attribute(self, name):
+        return self.value if name == "value" else None
+
+
+def test_fill_login_field_types_normally(naukri, monkeypatch):
+    field = LoginField(sticks=True)
+    monkeypatch.setattr(naukri, "driver", types.SimpleNamespace(execute_script=lambda *a: pytest.fail("JS not needed")))
+    naukri.fill_login_field(field, "me@example.com")
+    assert field.value == "me@example.com"
+
+
+def test_fill_login_field_sets_value_when_typing_is_wiped(naukri, monkeypatch):
+    # Live 2026-11-16: both fields read empty after typing -> "cannot be left blank".
+    field = LoginField(sticks=False)
+
+    def execute_script(script, element, text):
+        assert "dispatchEvent" in script
+        element.value = text
+
+    monkeypatch.setattr(naukri, "driver", types.SimpleNamespace(execute_script=execute_script))
+    naukri.fill_login_field(field, "me@example.com")
+    assert field.value == "me@example.com"
+
+
+def test_login_fills_fields_through_the_checked_helper(naukri):
+    import inspect
+    source = inspect.getsource(naukri.login_naukri)
+    assert "fill_login_field(username_field, naukri_username)" in source
+    assert "fill_login_field(password_field, naukri_password)" in source
+    assert "username_field.send_keys(naukri_username)" not in source
+
+
 # ------------------------------- Career-Ops fit check ----------------------------------
 class TextDriver:
     '''Answers find_elements with elements carrying `.text`, for every XPath in `texts`.'''

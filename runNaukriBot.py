@@ -71,6 +71,22 @@ def record_naukri(title: str, company: str, status: str, link: str) -> None:
         logger.error("Failed to record this Naukri application!", exc_info=e)
 
 
+_SET_INPUT_VALUE = ("const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;"
+                    "set.call(arguments[0], arguments[1]);"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));")
+
+
+def fill_login_field(field, text: str) -> None:
+    '''Naukri's login page can wipe what was typed while its scripts are still loading (seen live:
+    both fields empty after typing, then "cannot be left blank"). Type normally; if the value didn't
+    stick, set it the way the page's own input handlers listen for.'''
+    field.clear()
+    field.send_keys(text)
+    if (field.get_attribute("value") or "") != text:
+        driver.execute_script(_SET_INPUT_VALUE, field, text)
+
+
 def login_naukri() -> bool:
     '''Logs in to Naukri.com. Returns False (and logs why) instead of raising, so a bad
     login is reported cleanly rather than crashing the run.'''
@@ -84,8 +100,12 @@ def login_naukri() -> bool:
         # element_to_be_clickable waits for visible AND enabled, which is what typing needs.
         username_field = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.ID, "usernameField")))
         password_field = WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.ID, "passwordField")))
-        username_field.send_keys(naukri_username)
-        password_field.send_keys(naukri_password)
+        fill_login_field(username_field, naukri_username)
+        fill_login_field(password_field, naukri_password)
+        buffer(1)
+        # Re-check just before submitting: a late page script can still clear a field.
+        if username_field.get_attribute("value") != naukri_username: fill_login_field(username_field, naukri_username)
+        if password_field.get_attribute("value") != naukri_password: fill_login_field(password_field, naukri_password)
         password_field.send_keys(Keys.ENTER)
     except TimeoutException:
         # Already logged in (session redirected to homepage)
@@ -104,8 +124,8 @@ def login_naukri() -> bool:
         try:
             username_field = driver.find_element(By.ID, "usernameField")
             password_field = driver.find_element(By.ID, "passwordField")
-            username_field.send_keys(naukri_username)
-            password_field.send_keys(naukri_password)
+            fill_login_field(username_field, naukri_username)
+            fill_login_field(password_field, naukri_password)
             password_field.send_keys(Keys.ENTER)
             buffer(5)
             if "login" not in driver.current_url.lower():
