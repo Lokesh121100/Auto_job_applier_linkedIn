@@ -45,6 +45,42 @@ def test_config_save_coerces_and_roundtrips(client, tmp_path, monkeypatch):
     assert got["secrets"]["use_AI"] is True
 
 
+def test_job_scoring_settings_are_offered_in_the_panel(client):
+    '''Career-Ops scoring is only configurable if the panel actually exposes it - without
+    this section the only way to change the threshold is editing config/settings.py by hand.'''
+    sections = {s["section"]: s for s in client.get("/api/schema").get_json()}
+    assert "Job scoring" in sections
+    offered = {f["key"]: f for f in sections["Job scoring"]["fields"]}
+    assert set(offered) == {"career_ops_scoring", "career_ops_min_score", "career_ops_cv_path",
+                            "career_ops_extra_skills", "career_ops_path"}
+    # These live in config/settings.py, so the saved JSON section must be "settings"
+    # for config/_overrides.py to apply them.
+    assert {f["config_module"] for f in offered.values()} == {"settings"}
+    assert offered["career_ops_min_score"]["type"] == "number"
+    assert offered["career_ops_extra_skills"]["type"] == "list"
+
+
+def test_job_scoring_settings_roundtrip_through_the_api(client, tmp_path, monkeypatch):
+    import app
+    import config._overrides as overrides
+    cfg_path = str(tmp_path / "user_config.json")
+    monkeypatch.setattr(app, "USER_CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(overrides, "USER_CONFIG_PATH", cfg_path)
+
+    resp = client.post("/api/config", json={"settings": {
+        "career_ops_min_score": "55",                      # string -> coerced to a number
+        "career_ops_scoring": "false",                     # string -> coerced to a bool
+        "career_ops_extra_skills": "Power Apps, SPFx",     # comma text -> coerced to a list
+    }})
+    assert resp.status_code == 200
+
+    with open(cfg_path, encoding="utf-8") as f:
+        saved = json.load(f)["settings"]
+    assert saved["career_ops_min_score"] == 55
+    assert saved["career_ops_scoring"] is False
+    assert saved["career_ops_extra_skills"] == ["Power Apps", "SPFx"]
+
+
 def test_config_save_rejects_unknown_key(client, tmp_path, monkeypatch):
     import app
     import config._overrides as overrides

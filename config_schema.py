@@ -268,6 +268,30 @@ SCHEMA = [
         ],
     },
     {
+        "section": "Job scoring",
+        "fields": [
+            _f("Job scoring", "settings", "career_ops_scoring", "Score jobs before applying", "bool",
+               "Before applying, compare each job description against your resume and skip the ones that match poorly. "
+               "Works for both LinkedIn and Naukri. Needs Node.js and Career-Ops installed - if either is missing, "
+               "nothing is skipped and every job is applied to as usual."),
+            _f("Job scoring", "settings", "career_ops_min_score", "Lowest match % to still apply", "number",
+               "A job is skipped when fewer than this percentage of the skills named in its description also appear in "
+               "your resume. 0 to 100. Lower means you apply to more jobs; 40 is a sensible start. Jobs naming too few "
+               "recognisable skills to judge (fewer than 3) are always applied to rather than skipped."),
+            _f("Job scoring", "settings", "career_ops_cv_path", "Your resume as plain text", "text",
+               "Path to your resume in plain text or Markdown - the scorer cannot read PDFs. "
+               "Example: all resumes/default/resume.md. Regenerate this file whenever you update your real resume, "
+               "or scores will reflect the old one."),
+            _f("Job scoring", "settings", "career_ops_extra_skills", "Extra skills to count", "list",
+               "Skills the scorer's built-in list doesn't know, comma-separated. Each one found in a job description "
+               "counts towards the score, matched ignoring case and spaces (so 'PowerApps' matches 'Power Apps'). "
+               "Example: Power Apps, Power Automate, SharePoint, SPFx."),
+            _f("Job scoring", "settings", "career_ops_path", "Career-Ops folder", "text",
+               "Where Career-Ops was installed by `npx @santifer/career-ops init`. "
+               "Leave empty to use ~/.gemini/antigravity/scratch/career-ops-workspace.", advanced=True),
+        ],
+    },
+    {
         "section": "Run settings",
         "fields": [
             _f("Run settings", "settings", "run_in_background", "Run in background", "bool",

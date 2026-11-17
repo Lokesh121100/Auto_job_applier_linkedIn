@@ -20,7 +20,7 @@ One page per file in `config/`.
 | [`config/questions.py`](config-questions.md) | Easy Apply answers: experience, work authorization, salary, notice period, resume, pause behaviour |
 | [`config/search.py`](config-search.md) | Search terms, LinkedIn filters, skip rules, visa-sponsorship filtering |
 | [`config/secrets.py`](config-secrets.md) | LinkedIn login and the optional AI setup |
-| [`config/settings.py`](config-settings.md) | How the bot runs: click gap, background mode, safe mode, dry runs, logs |
+| [`config/settings.py`](config-settings.md) | How the bot runs: click gap, background mode, safe mode, job scoring, dry runs, logs |
 
 ## Project
 

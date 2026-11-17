@@ -69,6 +69,17 @@ def test_merges_career_ops_keywords_with_extra_skills(monkeypatch, cv, workspace
     assert result.score == 71
 
 
+def test_thin_description_career_ops_refuses_is_applied_to_not_skipped(monkeypatch, cv, workspace):
+    '''keyword-match.mjs exits 1 on a description under 200 characters ("too thin to score").
+    That must read as "cannot judge" - applied to - and never as a 0% match worth skipping,
+    which would silently drop every job whose page hadn't finished loading.'''
+    fake_node(monkeypatch, returncode=1, stdout="")
+    result = score("Senior Rust Engineer. Rust, WASM, C++. Apply on our site.", cv, workspace)
+    assert result.score is None
+    assert not result.failed                            # a thin JD is not a broken scorer
+    assert career_ops.skip_reason(result, 40) is None   # so the job is applied to
+
+
 def test_extra_skill_in_jd_but_not_cv_is_missing(monkeypatch, cv, workspace):
     fake_node(monkeypatch, present=["Azure", "React"], missing=[])
     result = score("Need SPFx, Azure, React", cv, workspace)

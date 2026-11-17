@@ -41,6 +41,65 @@ Behaviour of the tool itself, rather than what it says in an application. Mostly
 | `auto_manage_driver` | `True` | Download and match the right Chrome driver automatically. If `False`, install a matching ChromeDriver yourself — see [install step 5](install.md#manual-install) |
 | `showAiErrorAlerts` | `False` | Alert on errors from the AI API connection |
 
+## Job scoring: skip jobs that don't match your resume
+
+The **Job scoring** tab of the control panel. Before applying, the bot reads the job
+description, counts how many of the skills it names also appear in your resume, and skips
+the job when that percentage is too low. Works for both LinkedIn and Naukri.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `career_ops_scoring` | `True` | Turn scoring on or off. When off, every job is applied to as before |
+| `career_ops_min_score` | `40` | Lowest match percentage that still gets an application. `0` to `100` |
+| `career_ops_cv_path` | `"all resumes/default/resume.md"` | Your resume as **plain text or Markdown** — the scorer cannot read PDFs |
+| `career_ops_extra_skills` | Power Platform / SharePoint terms | Skills the scorer's built-in list doesn't know. Matched ignoring case and spaces, so `PowerApps` matches `Power Apps` |
+| `career_ops_path` | `""` | Folder where Career-Ops was installed. Empty means `~/.gemini/antigravity/scratch/career-ops-workspace` |
+
+### Setting it up
+
+Scoring is done by [Career-Ops](https://github.com/career-ops-hq/career-ops)' `keyword-match.mjs`,
+run as a separate Node process. Nothing from Career-Ops is copied into this project.
+
+1. Install [Node.js](https://nodejs.org) 16 or newer.
+2. Create the workspace: `npx @santifer/career-ops init`
+3. Save your resume as plain text or Markdown at `career_ops_cv_path`.
+
+### What you see while it runs
+
+```
+Career-Ops match: 83% (10/12 skills), missing: Java, NLP
+Career-Ops match: 25% (1/4 skills), missing: Databricks, MLOps, NLP
+-> Skipped - Career-Ops match 25% is below 40% (missing: Databricks, MLOps, NLP)
+```
+
+Skipped jobs are recorded in the failed-applications CSV with the reason, so you can see
+what was passed over and lower the threshold if it was too strict.
+
+### When it can't judge a job
+
+**Nothing is ever skipped without a score.** Three cases to know about:
+
+- **The description names fewer than three recognisable skills** — too little to judge, so
+  the job is applied to and the log says `not enough to judge, applying anyway`.
+- **The description is shorter than 200 characters** — Career-Ops refuses to score it at
+  all, which reaches the bot as zero recognised skills and the same
+  `not enough to judge, applying anyway`. Real postings are comfortably longer; what lands
+  here are "apply on our website" stubs and pages that load their text after the bot has
+  read them.
+- **Scoring is broken** — Node missing, no Career-Ops folder, no resume file at
+  `career_ops_cv_path`, or the scorer timed out (30s). You get one warning in the log and
+  the run continues applying to everything.
+
+This is deliberate: a broken scorer must not quietly stop you applying to jobs. If every
+job reports "applying anyway", check the log for that warning rather than assuming your
+threshold is wrong.
+
+### If your resume is a PDF
+
+Export it to Markdown or plain text and point `career_ops_cv_path` at that file. Keep it
+updated — the scorer compares against this file, not your real resume, so a stale copy
+gives misleading scores and skips jobs you are qualified for.
+
 ## Dry runs: `stop_before_submit`
 
 | Setting | Default | What it does |
