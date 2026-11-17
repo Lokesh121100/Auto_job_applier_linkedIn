@@ -298,13 +298,26 @@ def test_discard_job_uses_the_close_button_then_the_confirmation(bot, monkeypatc
     assert clicked == [".//button[@data-test-modal-close-btn]", bot.discard_button_xpath]
 
 
-def test_discard_job_falls_back_to_escape_when_the_modal_survives(bot, monkeypatch):
-    '''A modal left open intercepts every later click, which killed the whole run.'''
+def test_discard_job_tries_the_new_dismiss_label_before_escape(bot, monkeypatch):
+    '''The 2026 modal's close button is aria-label="Dismiss" with no data-test attribute, so
+    the old locator never matched and the modal stayed open - which then intercepted the next
+    job-card click and the pagination button.'''
     clicked = stub_discard(bot, monkeypatch, [True, False])
 
     bot.discard_job()
 
-    assert clicked.count(bot.discard_button_xpath) == 2      # button path, then ESCAPE path
+    assert "//button[@aria-label='Dismiss']" in clicked
+    assert not bot.actions.keys, "went to ESCAPE even though the Dismiss button worked"
+
+
+def test_discard_job_falls_back_to_escape_when_the_modal_survives(bot, monkeypatch):
+    '''A modal left open intercepts every later click, which killed the whole run.'''
+    clicked = stub_discard(bot, monkeypatch, [True, True, False])
+
+    bot.discard_job()
+
+    # data-test close, then the Dismiss label, then ESCAPE - each followed by the confirmation.
+    assert clicked.count(bot.discard_button_xpath) == 3
     assert bot.actions.keys, "ESCAPE fallback was never tried"
 
 

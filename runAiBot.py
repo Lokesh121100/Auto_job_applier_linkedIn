@@ -1344,10 +1344,30 @@ def submitted_jobs(job_id: str, title: str, company: str, work_location: str, wo
 # `data-control-name` is the language-independent anchor; the text is the fallback.
 discard_button_xpath = ".//button[@data-control-name='discard_application_confirm_btn' or contains(normalize-space(.), 'Discard')]"
 
+# The Easy Apply modal itself. LinkedIn's 2026 job pages render it as an SDUI screen with
+# randomised classes and NO "jobs-easy-apply-modal" anywhere, which is what every check here
+# used to look for. The consequence was not a cosmetic miss: the modal opened, the bot could
+# not see it, concluded the job was not Easy Apply, fell through to the external-apply path,
+# found no apply button there either and recorded "Failed to apply!". That is why a run could
+# submit zero Easy Apply applications while the modal was opening every time. The old class
+# stays as the fallback for the classic layout.
+EASY_APPLY_MODAL_XPATH = ("//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.jobs.easyapply.EasyApply']"
+                          " | //*[contains(@class,'jobs-easy-apply-modal')]")
+
+
+def find_easy_apply_modal(timeout: float = 3) -> WebElement | None:
+    '''The visible Easy Apply modal, or None if it isn't up within `timeout`.'''
+    try:
+        return WebDriverWait(driver, timeout).until(
+            lambda d: next((m for m in d.find_elements(By.XPATH, EASY_APPLY_MODAL_XPATH)
+                            if m.is_displayed()), None))
+    except Exception:
+        return None
+
+
 def easy_apply_modal_is_open() -> bool:
     '''True while an Easy Apply modal is still on screen and swallowing every click.'''
-    try: return any(m.is_displayed() for m in driver.find_elements(By.CLASS_NAME, "jobs-easy-apply-modal"))
-    except Exception: return False
+    return find_easy_apply_modal(0.5) is not None
 
 # Function to discard the job application
 def discard_job() -> None:
@@ -1360,7 +1380,12 @@ def discard_job() -> None:
     dialog animation (2s was too short), click Discard, and verify the modal is gone.
     ESCAPE stays as the fallback.
     '''
+    # The new modal's close button carries aria-label="Dismiss" and no data-test attribute,
+    # so the old locator never matched and the modal was left open - which is exactly what then
+    # intercepted the next job-card click and the pagination button. Exact match on the label:
+    # "Dismiss <job title> job" is a different button, on the job cards behind the modal.
     for dismiss in (lambda: try_xp(driver, ".//button[@data-test-modal-close-btn]"),
+                    lambda: try_xp(driver, "//button[@aria-label='Dismiss']"),
                     lambda: actions.send_keys(Keys.ESCAPE).perform()):
         try: dismiss()
         except Exception as e: logger.warning("Couldn't dismiss the application modal. %s", e)
@@ -1680,7 +1705,8 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                 driver.switch_to.window(linkedIn_tab)
                                 print_lg(f"A new tab opened ({how}) - external application.")
                                 break
-                            find_by_class(driver, "jobs-easy-apply-modal", 3)
+                            if find_easy_apply_modal(3) is None:
+                                raise NoSuchElementException("the Easy Apply modal did not open")
                             is_easy_apply = True
                             print_lg(f"Easy Apply detected ({how}).")
                             break
@@ -1696,7 +1722,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                             modal = driver
                             try:
                                 errored = ""
-                                modal = find_by_class(driver, "jobs-easy-apply-modal")
+                                modal = find_easy_apply_modal(5) or driver
                                 wait_xp_click(modal, next_button_xpath, 1)
                                 resume = "Previous resume"
                                 next_button = True

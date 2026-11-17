@@ -8,6 +8,7 @@ Each test fails if the specific bug it covers comes back.
 License: MIT  (https://opensource.org/license/mit)
 '''
 
+import inspect
 import os
 import sys
 import types
@@ -254,6 +255,44 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert contacted == {"https://www.linkedin.com/in/asha"}
     assert per_company == {"GIVA": 1}
     assert today == 1
+
+
+# ---------- the Easy Apply modal must be recognised on the 2026 layout --------------
+def test_modal_locator_matches_the_sdui_screen_and_the_old_class(bot):
+    '''LinkedIn's 2026 job pages render the modal as an SDUI screen with randomised classes and
+    no "jobs-easy-apply-modal" anywhere. Checking only that class meant the modal opened, the
+    bot could not see it, and every Easy Apply job fell through to the external path and was
+    recorded "Failed to apply!" - a run submitting zero applications while the modal worked.'''
+    xp = bot.EASY_APPLY_MODAL_XPATH
+    assert "easyapply.EasyApply" in xp, "new SDUI modal screen not matched"
+    assert "jobs-easy-apply-modal" in xp, "classic layout no longer matched"
+
+
+def test_modal_is_open_is_false_when_nothing_is_displayed(bot, monkeypatch):
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(find_elements=lambda by, xp: []))
+    assert bot.easy_apply_modal_is_open() is False
+
+
+def test_modal_is_open_is_true_for_a_displayed_sdui_modal(bot, monkeypatch):
+    shown = FakeElement()
+    shown.is_displayed = lambda: True
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(find_elements=lambda by, xp: [shown]))
+    assert bot.easy_apply_modal_is_open() is True
+
+
+def test_modal_is_open_ignores_a_hidden_match(bot, monkeypatch):
+    hidden = FakeElement()
+    hidden.is_displayed = lambda: False
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(find_elements=lambda by, xp: [hidden]))
+    assert bot.easy_apply_modal_is_open() is False
+
+
+def test_discard_targets_the_real_dismiss_label_exactly(bot):
+    '''The new close button is aria-label="Dismiss" with no data-test attribute. It must match
+    exactly: "Dismiss <job title> job" is a job-card button behind the modal, not the modal's.'''
+    src = inspect.getsource(bot.discard_job)
+    assert "@aria-label='Dismiss'" in src
+    assert "contains(@aria-label,'Dismiss')" not in src
 
 
 # --------- the Apply button gets longer than the shared 5s wait to appear -----------
