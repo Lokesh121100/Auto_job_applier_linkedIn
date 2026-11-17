@@ -314,6 +314,8 @@ SCHEMA = [
                "Employees are found by searching '<company> <keyword>' for each of these, comma-separated. Example: Power Platform, SharePoint, .NET, Recruiter."),
             _f("Run settings", "settings", "referral_message", "Referral note", "textarea",
                "Sent with each request, up to 200 characters (longer notes are shortened). Placeholders: {first_name} (theirs), {job_title}, {company}, {my_name}."),
+            _f("Run settings", "settings", "referral_recent_days", "Only ask at companies applied to in the last N days", "number",
+               "Your note says \"I just applied\", which stops being true for an application from weeks ago - and a referral helps most while the application is still fresh. 7 is a sensible window. 0 means every company you have ever applied to, which spends your limited monthly invitations on the oldest ones first."),
             _f("Run settings", "settings", "referral_require_note", "Only send requests that carry your note", "bool",
                "LinkedIn's free plan allows only a handful of personalised invitations a month. When that quota is used up it offers to send the request without your note - a bare request from a stranger, which rarely earns a referral and still spends your weekly invitation allowance. On, that person is skipped instead and can be asked properly after the quota resets. Off, the request goes out with no note."),
             # --- advanced run options ---

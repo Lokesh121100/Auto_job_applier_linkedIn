@@ -11,6 +11,7 @@ License: MIT  (https://opensource.org/license/mit)
 import os
 import sys
 import types
+from datetime import datetime, timedelta
 
 import pytest
 from selenium.common.exceptions import NoSuchElementException
@@ -226,6 +227,9 @@ def test_referral_targets_are_only_submitted_easy_applies_one_per_company(bot, t
         "Kaufman Rossin,Analyst,Easy Applied,2026-10-01 11:58:00,Unknown,Unknown\n",
         encoding="utf-8")
     monkeypatch.setattr(bot, "file_name", str(applied))
+    # This test is about the Easy-Applied / one-per-company filter, not the recency window,
+    # so take the window out of it - these fixed dates would otherwise age out of any window.
+    monkeypatch.setattr(bot, "referral_recent_days", 0)
     targets = bot.load_referral_targets()
     assert [(t["Company"], t["Title"]) for t in targets] == [("Kaufman Rossin", "Analyst"), ("GIVA", "Data Analyst")]
 
@@ -250,6 +254,76 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert contacted == {"https://www.linkedin.com/in/asha"}
     assert per_company == {"GIVA": 1}
     assert today == 1
+
+
+# ------------------- referral targets: recent companies, correctly ordered ----------
+def write_history(path, rows):
+    '''An applied-jobs history CSV holding just the columns load_referral_targets() reads.'''
+    import csv as _csv
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=["Company", "Title", "Date Applied", "External Job link"])
+        w.writeheader()
+        for company, date in rows:
+            w.writerow({"Company": company, "Title": "Developer",
+                        "Date Applied": date, "External Job link": "Easy Applied"})
+
+
+@pytest.fixture
+def history(bot, tmp_path, monkeypatch):
+    path = tmp_path / "applied.csv"
+    monkeypatch.setattr(bot, "file_name", str(path))
+    return path
+
+
+LOST = "Unknown (timestamp lost to an Excel edit on 2026-10-06)"
+
+
+def test_undated_rows_no_longer_jump_ahead_of_real_dates(bot, monkeypatch, history):
+    '''"Unknown (timestamp..." used to sort above every "2026-.." date, because "U" > "2",
+    so referrals began at the oldest, least certain companies instead of the newest.'''
+    now = datetime.now()
+    write_history(history, [
+        ("OldUndated", LOST),
+        ("AppliedToday", now.strftime("%Y-%m-%d %H:%M:%S.%f")),
+        ("AppliedYesterday", (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S.%f")),
+    ])
+    monkeypatch.setattr(bot, "referral_recent_days", 0)       # no window: keep everything
+    assert [r["Company"] for r in bot.load_referral_targets()] == [
+        "AppliedToday", "AppliedYesterday", "OldUndated"]
+
+
+def test_only_companies_inside_the_recent_window_are_asked(bot, monkeypatch, history):
+    now = datetime.now()
+    write_history(history, [
+        ("Fresh", (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S.%f")),
+        ("SixWeeksAgo", (now - timedelta(days=42)).strftime("%Y-%m-%d %H:%M:%S.%f")),
+        ("Undated", LOST),
+    ])
+    monkeypatch.setattr(bot, "referral_recent_days", 7)
+    # An unreadable date cannot be shown to be recent, so it fails the window too.
+    assert [r["Company"] for r in bot.load_referral_targets()] == ["Fresh"]
+
+
+def test_one_entry_per_company_keeping_its_newest_application(bot, monkeypatch, history):
+    now = datetime.now()
+    write_history(history, [
+        ("Acme", (now - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S.%f")),
+        ("Acme", (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S.%f")),
+    ])
+    monkeypatch.setattr(bot, "referral_recent_days", 7)
+    targets = bot.load_referral_targets()
+    assert len(targets) == 1
+    assert bot.applied_timestamp(targets[0]).date() == (now - timedelta(days=1)).date()
+
+
+@pytest.mark.parametrize("raw", [LOST, "", "Pending", "not a date", None])
+def test_applied_timestamp_is_none_for_anything_that_is_not_a_timestamp(bot, raw):
+    assert bot.applied_timestamp({"Date Applied": raw}) is None
+
+
+def test_applied_timestamp_reads_the_format_the_bot_writes(bot):
+    assert (bot.applied_timestamp({"Date Applied": "2026-10-07 10:45:07.648837"})
+            == datetime(2026, 10, 7, 10, 45, 7, 648837))
 
 
 # --------------------- the monthly note quota: skip rather than send blank -----------

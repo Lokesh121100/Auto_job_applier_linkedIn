@@ -203,6 +203,7 @@ def validate_settings() -> None | ValueError | TypeError:
     check_boolean(send_referrals_after_applying, "send_referrals_after_applying")
     check_boolean(referral_require_note, "referral_require_note")
     check_int(referral_daily_limit, "referral_daily_limit", 1)
+    check_int(referral_recent_days, "referral_recent_days", 0)
     check_int(referrals_per_company, "referrals_per_company", 1)
     check_list(referral_role_keywords, "referral_role_keywords")
     check_string(referral_message, "referral_message", min_length=1)

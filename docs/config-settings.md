@@ -56,8 +56,20 @@ Premium/InMail.
 | `referrals_per_company` | `2` | Most people to contact per company (the hiring manager counts as one) |
 | `referral_role_keywords` | `Developer, Engineer, Recruiter` | People are found by searching `"<company> <keyword>"` for each of these, in order |
 | `referral_message` | see file | The note sent with each request. Max 200 characters; longer notes are shortened. Placeholders: `{first_name}` (theirs), `{job_title}`, `{company}`, `{my_name}` |
+| `referral_recent_days` | `7` | Only ask at companies applied to within this many days. `0` means every company you have ever applied to |
 | `referral_require_note` | `True` | Skip people when LinkedIn's note quota is used up, rather than sending a request with no note |
 | `referral_file_name` | `"all excels/referrals_history.csv"` | Every request is recorded here, so **nobody is contacted twice** |
+
+### Which companies get asked
+
+Referral targets come from your **applied-jobs history**, not just the run that has
+just finished — so a run can ask at a company you applied to a few days ago. Only
+companies inside the `referral_recent_days` window are used, newest application first,
+one entry per company.
+
+Rows whose `Date Applied` is not a real timestamp cannot be shown to be recent, so they
+fall outside the window and are skipped. Setting `referral_recent_days = 0` removes the
+window and works through everything, placing undated rows last.
 
 ### The monthly note quota
 

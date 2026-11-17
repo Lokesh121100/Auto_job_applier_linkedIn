@@ -121,6 +121,12 @@ referral_role_keywords = ["Developer", "Engineer", "Recruiter"]
 # Placeholders: {first_name} (theirs), {job_title}, {company}, {my_name}.
 referral_message = "Hi {first_name}, I just applied for the {job_title} role at {company}. Would you be open to referring me? Happy to share my resume. Thank you, {my_name}"
 
+# Only ask for referrals at companies you applied to within this many days. The note says
+# "I just applied", which stops being true for an application from weeks ago, and a referral
+# helps most while the application is still fresh. 0 means every company you have ever
+# applied to, which spends your limited invitations on the oldest ones first.
+referral_recent_days = 7            # Only numbers 0 or greater... Don't put in quotes
+
 # LinkedIn's free plan allows only a handful of personalised invitations a month. Once that
 # quota is used up it offers to send the request WITHOUT your note - a bare request from a
 # stranger, which rarely earns a referral and still spends your weekly invitation allowance.

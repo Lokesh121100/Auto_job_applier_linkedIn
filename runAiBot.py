@@ -27,7 +27,7 @@ import pyautogui
 csv.field_size_limit(1000000)
 
 from random import choice, shuffle
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 from selenium.webdriver.common.by import By
@@ -1886,18 +1886,51 @@ def referral_note(their_first_name: str, job_title: str, company: str) -> str:
     return note[:REFERRAL_NOTE_LIMIT]
 
 
+def applied_timestamp(row: dict) -> datetime | None:
+    '''The row's "Date Applied" as a datetime, or None when it isn't a real timestamp.
+
+    Not every row has one: 42 rows of this project's own history read
+    "Unknown (timestamp lost to an Excel edit on 2026-10-06)". Sorting on the raw text put
+    those ahead of every real "2026-.." date, because "U" > "2", so referral requests
+    started at the oldest and least certain companies instead of the newest.
+    '''
+    raw = (row.get('Date Applied') or '').strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def load_referral_targets() -> list[dict]:
-    '''One entry per company actually applied to (Easy Apply, submitted), most recent first.'''
-    targets: dict[str, dict] = {}
+    '''One entry per company actually applied to (Easy Apply, submitted), newest first.
+
+    Only companies applied to within the last `referral_recent_days` days, so the note's
+    "I just applied for..." stays true and the request arrives while the application is
+    still in front of whoever reads it. `referral_recent_days = 0` means no limit, and
+    then rows with no usable date sort last rather than first.
+    '''
+    cutoff = datetime.now() - timedelta(days=referral_recent_days) if referral_recent_days > 0 else None
+    rows = []
     try:
         with open(file_name, encoding='utf-8') as csv_file:
             for row in csv.DictReader(csv_file):
                 if row.get('External Job link') != "Easy Applied" or row.get('Date Applied') in ('', 'Pending', None): continue
                 company = (row.get('Company') or '').strip()
-                if company: targets[company] = row
+                if not company: continue
+                applied_at = applied_timestamp(row)
+                # An unreadable date can't be shown to be recent, so it fails the window.
+                if cutoff is not None and (applied_at is None or applied_at < cutoff): continue
+                rows.append((applied_at, company, row))
     except FileNotFoundError:
         return []
-    return sorted(targets.values(), key=lambda row: row['Date Applied'], reverse=True)
+    # Newest first; undated rows last, since True sorts above False under reverse.
+    rows.sort(key=lambda entry: (entry[0] is not None, entry[0] or datetime.min), reverse=True)
+    targets: dict[str, dict] = {}
+    for _, company, row in rows:
+        targets.setdefault(company, row)      # first seen per company is its newest
+    return list(targets.values())
 
 
 def load_referral_history() -> tuple[set[str], dict[str, int], int]:
