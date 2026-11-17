@@ -433,24 +433,25 @@ def get_ai_search_card_details(job: WebElement, blacklisted_companies: set, reje
     else:
         skip = False
         scroll_to_view(driver, job, True)
-        try:
-            job.click()
-        except ElementClickInterceptedException:
-            # A dialog left open over the results list swallows the click. Seen live: an open
-            # <dialog data-testid="dialog"> intercepted every card click, and the exception
-            # travelled all the way out of apply_to_jobs and ended the whole run.
-            if not dismiss_open_dialog():
-                raise
-            job.click()
+        click_through_overlays(job)
         buffer(click_gap)
     return job_id, title, company, work_location, work_style, skip
 
 
-def dismiss_open_dialog() -> bool:
-    '''Closes whatever modal is open over the page. True if one was there to close.
+_overlay_logged: set[str] = set()
 
-    LinkedIn leaves dialogs open after an application, a "save job" confirmation or a promo,
-    and an open dialog intercepts clicks on everything behind it.
+
+def dismiss_open_dialog() -> bool:
+    '''Closes any modal covering the page. True only when one actually went away.
+
+    LinkedIn leaves dialogs open after an application, a save-job confirmation or a promo,
+    and an open dialog intercepts clicks on everything behind it - card clicks and the
+    pagination buttons alike.
+
+    A <dialog> is closed through its own close() method rather than by hunting for a button:
+    an earlier version searched the whole document for "Dismiss"/"Close"/"Cancel", so it
+    clicked whatever it found anywhere on the page (LinkedIn's messaging overlay is also
+    role="dialog"), reported success and left the real blocker open.
     '''
     try:
         dialogs = [d for d in driver.find_elements(By.XPATH, "//dialog[@open] | //*[@role='dialog']")
@@ -459,15 +460,56 @@ def dismiss_open_dialog() -> bool:
         return False
     if not dialogs:
         return False
-    print_lg(f"Closing {len(dialogs)} dialog(s) covering the results list.")
-    # try_xp clicks and returns True when click is left at its default.
-    for label in ("Dismiss", "Close", "Cancel"):
-        if try_xp(driver, f"//*[self::button or @role='button'][@aria-label='{label}' or normalize-space(.)='{label}']"):
-            break
-    else:
-        actions.send_keys(Keys.ESCAPE).perform()
-        buffer(click_gap)
-    return True
+    for dialog in dialogs:
+        try:
+            # Native close() for a real <dialog>; for role="dialog", its own close button,
+            # looked up INSIDE that element so no unrelated button can be hit.
+            driver.execute_script(
+                "const d = arguments[0];"
+                "if (typeof d.close === 'function') { try { d.close(); } catch (e) {} }"
+                "if (d.isConnected && d.offsetParent !== null) {"
+                "  const b = d.querySelector('button[aria-label*=\"iss\" i],button[aria-label*=\"lose\" i],"
+                "button[aria-label*=\"ancel\" i],button[aria-label*=\"ot now\" i]');"
+                "  if (b) b.click();"
+                "}", dialog)
+        except WebDriverException:
+            continue
+    buffer(1)
+    try:
+        still_open = [d for d in driver.find_elements(By.XPATH, "//dialog[@open] | //*[@role='dialog']")
+                      if d.is_displayed()]
+    except WebDriverException:
+        return False
+    closed = len(dialogs) - len(still_open)
+    if closed > 0 and "closed" not in _overlay_logged:
+        _overlay_logged.add("closed")
+        print_lg("Closed a dialog that was covering the results list (logged once per run).")
+    return closed > 0
+
+
+def click_through_overlays(element: WebElement) -> None:
+    '''Clicks `element`, getting past anything covering it.
+
+    Live, an open <dialog> intercepted every job-card click AND the "Page 2" button, and the
+    exception travelled out of apply_to_jobs, ending a run across all 12 search terms. Closing
+    the dialog is tried first because it is the real repair; a DOM click is the fallback,
+    since it reaches the element regardless of what is painted on top of it.
+    '''
+    try:
+        element.click()
+        return
+    except ElementClickInterceptedException:
+        pass
+    dismiss_open_dialog()
+    try:
+        element.click()
+        return
+    except ElementClickInterceptedException:
+        pass
+    if "js" not in _overlay_logged:
+        _overlay_logged.add("js")
+        print_lg("Something is still covering the page; clicking through it (logged once per run).")
+    driver.execute_script("arguments[0].click();", element)
 
 
 def read_job_description_text() -> str:
@@ -1775,7 +1817,10 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                     print_lg("Couldn't find pagination element, probably at the end page of results!")
                     break
                 try:
-                    pagination_element.find_element(By.XPATH, f".//button[@aria-label='Page {current_page+1}']").click()
+                    # Through the overlay helper: live, the same open dialog that blocked the
+                    # job cards also intercepted this button, so paging stopped at page 1.
+                    click_through_overlays(pagination_element.find_element(
+                        By.XPATH, f".//button[@aria-label='Page {current_page+1}']"))
                     print_lg(f"\n>-> Now on Page {current_page+1} \n")
                 except NoSuchElementException:
                     print_lg(f"\n>-> Didn't find Page {current_page+1}. Probably at the end page of results!\n")

@@ -292,32 +292,55 @@ def test_intercepted_card_click_is_retried_after_closing_the_dialog(bot, monkeyp
     assert (title, company, skip) == ("Power Platform Developer", "Acme", False)
 
 
-def test_intercepted_click_still_raises_when_there_was_no_dialog_to_close(bot, monkeypatch):
-    '''With nothing covering the card the click is blocked for some other reason, so it must
-    surface rather than be silently retried forever.'''
+def test_a_click_nothing_can_unblock_falls_back_to_a_dom_click(bot, monkeypatch):
+    '''When the overlay cannot be closed, the click still has to land: a DOM click reaches the
+    element whatever is painted on top. Live, giving up here cost a whole run.'''
     from selenium.common.exceptions import ElementClickInterceptedException
+    scripts = []
 
-    class Card(FakeElement):
-        def __init__(self):
-            super().__init__()
-            self.children = {".//p": [FakeElement(text="Dev"), FakeElement(text="Acme"),
-                                      FakeElement(text="Chennai")]}
-
+    class Blocked(FakeElement):
         def click(self):
             raise ElementClickInterceptedException("element click intercepted")
 
-        def get_dom_attribute(self, name):
-            return None
-
-    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
-    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    target = Blocked()
     monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
-    monkeypatch.setattr(bot, "card_job_id", lambda card: "1")
-    monkeypatch.setattr(bot, "split_location", lambda text: ("Chennai", ""))
     monkeypatch.setattr(bot, "dismiss_open_dialog", lambda: False)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        execute_script=lambda script, *args: scripts.append((script, args))))
 
-    with pytest.raises(ElementClickInterceptedException):
-        bot.get_ai_search_card_details(Card(), set(), set())
+    bot.click_through_overlays(target)
+    assert len(scripts) == 1 and "click()" in scripts[0][0]
+    assert scripts[0][1] == (target,)
+
+
+def test_dismiss_open_dialog_reports_false_when_nothing_actually_closed(bot, monkeypatch):
+    '''It used to click any "Close" button anywhere on the page - LinkedIn's messaging overlay
+    is also role="dialog" - then report success while the real blocker stayed open, so the
+    caller retried a still-blocked click.'''
+    stuck = FakeElement()
+    stuck.is_displayed = lambda: True
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xpath: [stuck],      # still there after the close attempt
+        execute_script=lambda script, *args: None))
+    assert bot.dismiss_open_dialog() is False
+
+
+def test_dismiss_open_dialog_reports_true_once_the_dialog_is_gone(bot, monkeypatch):
+    shown = FakeElement()
+    shown.is_displayed = lambda: True
+    calls = {"n": 0}
+
+    def find_elements(by, xpath):
+        calls["n"] += 1
+        return [shown] if calls["n"] == 1 else []      # gone on the verification pass
+
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=find_elements, execute_script=lambda script, *args: None))
+    assert bot.dismiss_open_dialog() is True
 
 
 # ------------------- referral targets: recent companies, correctly ordered ----------
