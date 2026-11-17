@@ -1167,6 +1167,11 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
 # fallback for older renders. Never the design-system size token (artdeco-button--<n>).
 apply_button_xpath = ".//button[@id='jobs-apply-button-id' or contains(@class,'jobs-apply-button')]"
 
+# How long to wait for that button specifically. The shared `wait` is 5s, which is fine for
+# elements already on the page but too short for the details pane LinkedIn builds after the
+# card click - see the comment in external_apply().
+APPLY_BUTTON_TIMEOUT = 20
+
 def external_apply(pagination_element: WebElement, job_id: str, job_link: str, resume: str, date_listed, application_link: str, screenshot_name: str) -> tuple[bool, str, int]:
     '''
     Function to open new tab and save external job application links
@@ -1185,7 +1190,14 @@ def external_apply(pagination_element: WebElement, job_id: str, job_link: str, r
     try:
         # The design-system button SIZE class this used to also require (artdeco-button--<n>)
         # has nothing to do with applying and churns with every restyle, so it's gone.
-        wait.until(EC.element_to_be_clickable((By.XPATH, apply_button_xpath))).click()
+        #
+        # Its own longer wait, not the shared 5s one: LinkedIn renders the details pane after
+        # the card click, and the Apply button is among the last parts to arrive. At 5s this
+        # timed out on roughly one job in six and logged "Failed to apply!" for jobs that were
+        # perfectly applicable - the saved page showed a details pane with no controls in it
+        # at all, not a job without an Apply button.
+        WebDriverWait(driver, APPLY_BUTTON_TIMEOUT).until(
+            EC.element_to_be_clickable((By.XPATH, apply_button_xpath))).click()
         wait_span_click(driver, "Continue", 1, True, False)
         windows = driver.window_handles
         tabs_count = len(windows)
@@ -1196,9 +1208,15 @@ def external_apply(pagination_element: WebElement, job_id: str, job_link: str, r
         driver.switch_to.window(linkedIn_tab)
         return False, application_link, tabs_count
     except Exception as e:
-        # print_lg(e)
-        logger.warning("Failed to apply!")
-        failed_job(job_id, job_link, resume, date_listed, "Probably didn't find Apply button or unable to switch tabs.", e, application_link, screenshot_name)
+        # Name the case. "Failed to apply!" alone was indistinguishable between an Apply button
+        # that never rendered in time and a tab that wouldn't switch, which sent me looking for
+        # a dead selector when the real cause was the timeout above.
+        if isinstance(e, TimeoutException):
+            reason = f"No Apply button within {APPLY_BUTTON_TIMEOUT}s - the details pane may not have loaded"
+        else:
+            reason = f"{type(e).__name__} while opening the external application"
+        logger.warning("Failed to apply! %s", reason)
+        failed_job(job_id, job_link, resume, date_listed, reason, e, application_link, screenshot_name)
         global failed_count
         failed_count += 1
         return True, application_link, tabs_count

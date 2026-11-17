@@ -256,6 +256,21 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert today == 1
 
 
+# --------- the Apply button gets longer than the shared 5s wait to appear -----------
+def test_apply_button_waits_longer_than_the_shared_wait(bot):
+    '''The details pane is built after the card click and the Apply button arrives last. At the
+    shared 5s this timed out on roughly one job in six, reporting "Failed to apply!" for jobs
+    that were perfectly applicable.'''
+    assert bot.APPLY_BUTTON_TIMEOUT >= 15
+
+
+def test_apply_button_selector_accepts_both_renders(bot):
+    '''Stable id first, old class as the fallback, and never the design-system size token.'''
+    xp = bot.apply_button_xpath
+    assert "jobs-apply-button-id" in xp and "jobs-apply-button" in xp
+    assert "artdeco-button--" not in xp
+
+
 # ------------- a dialog over the results list must not end the whole run -------------
 def test_intercepted_card_click_is_retried_after_closing_the_dialog(bot, monkeypatch):
     '''Live, an open <dialog data-testid="dialog"> intercepted every job-card click and the
