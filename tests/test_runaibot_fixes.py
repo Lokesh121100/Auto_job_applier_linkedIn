@@ -257,6 +257,37 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert today == 1
 
 
+# -------- after the apply click, wait for EITHER outcome, neither is instant ---------
+def test_a_slow_external_tab_is_still_seen_as_external(bot, monkeypatch):
+    '''The window count used to be read once, about a second after the click. LinkedIn's
+    redirect tab is often not open yet then, so an external job matched neither outcome and was
+    recorded as a failure while its tab was still on the way - seen live on an 80% job.'''
+    polls = {"n": 0}
+
+    class Driver:
+        @property
+        def window_handles(self):
+            polls["n"] += 1
+            return ["a", "b"] if polls["n"] > 4 else ["a"]      # tab opens late
+
+    monkeypatch.setattr(bot, "driver", Driver())
+    monkeypatch.setattr(bot, "find_easy_apply_modal", lambda timeout=0.4: None)
+    assert bot.wait_for_apply_outcome(1, timeout=5) == "external"
+    assert polls["n"] > 1, "gave up after a single look"
+
+
+def test_an_opened_modal_is_reported_as_modal(bot, monkeypatch):
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(window_handles=["a"]))
+    monkeypatch.setattr(bot, "find_easy_apply_modal", lambda timeout=0.4: FakeElement())
+    assert bot.wait_for_apply_outcome(1, timeout=5) == "modal"
+
+
+def test_neither_outcome_reports_nothing_rather_than_hanging(bot, monkeypatch):
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(window_handles=["a"]))
+    monkeypatch.setattr(bot, "find_easy_apply_modal", lambda timeout=0.4: None)
+    assert bot.wait_for_apply_outcome(1, timeout=1) == "nothing"
+
+
 # ---------- the Easy Apply modal must be recognised on the 2026 layout --------------
 def test_modal_locator_matches_the_sdui_screen_and_the_old_class(bot):
     '''LinkedIn's 2026 job pages render the modal as an SDUI screen with randomised classes and

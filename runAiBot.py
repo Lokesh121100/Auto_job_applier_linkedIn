@@ -1369,6 +1369,27 @@ def easy_apply_modal_is_open() -> bool:
     '''True while an Easy Apply modal is still on screen and swallowing every click.'''
     return find_easy_apply_modal(0.5) is not None
 
+
+def wait_for_apply_outcome(tabs_open: int, timeout: float = 12) -> str:
+    '''What the apply click led to: "external" (a new tab), "modal" (Easy Apply) or "nothing".
+
+    Neither outcome is instant and the external one is the slower of the two. The window count
+    used to be read once, right after the click plus a `click_gap` pause of about a second;
+    LinkedIn's redirect tab often is not open yet at that point, so an external job looked like
+    neither outcome, fell through to the Easy Apply branch and was recorded as a failure while
+    its tab was still on the way. Seen live on a job that scored 80%.
+    '''
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if len(driver.window_handles) > tabs_open:
+                return "external"
+        except WebDriverException:
+            return "nothing"
+        if find_easy_apply_modal(0.4) is not None:
+            return "modal"
+    return "nothing"
+
 # Function to discard the job application
 def discard_job() -> None:
     '''
@@ -1690,8 +1711,11 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                         try:
                             tabs_open = len(driver.window_handles)
                             apply_button.click()
-                            buffer(click_gap)
-                            if len(driver.window_handles) > tabs_open:
+                            # One wait that watches for BOTH outcomes, instead of reading the
+                            # window count once a second after the click and then looking for
+                            # the modal - which failed external jobs whose tab was still opening.
+                            outcome = wait_for_apply_outcome(tabs_open)
+                            if outcome == "external":
                                 # A new tab opened -> external apply. Capture its link before
                                 # closing it. external_apply() used to run unconditionally right
                                 # after this and click Apply a SECOND time on a page whose state
@@ -1705,8 +1729,9 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                 driver.switch_to.window(linkedIn_tab)
                                 print_lg(f"A new tab opened ({how}) - external application.")
                                 break
-                            if find_easy_apply_modal(3) is None:
-                                raise NoSuchElementException("the Easy Apply modal did not open")
+                            if outcome != "modal":
+                                raise NoSuchElementException(
+                                    "neither a new tab nor the Easy Apply modal appeared")
                             is_easy_apply = True
                             print_lg(f"Easy Apply detected ({how}).")
                             break
@@ -1739,6 +1764,21 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                             continue
                                         if questions_list: print_lg("Stuck for one or some of the following questions...", questions_list)
                                         screenshot_name = screenshot(driver, job_id, "Failed at questions")
+                                        # Keep the modal's own markup, not just a screenshot. The 2026
+                                        # layout randomises its classes, so the only way to find out
+                                        # which field selectors have gone stale is to read the real
+                                        # thing - a picture of it cannot be grepped for a locator.
+                                        if "easy_apply_stuck" not in referral_pages_saved:
+                                            referral_pages_saved.add("easy_apply_stuck")
+                                            try:
+                                                stuck_modal = find_easy_apply_modal(2)
+                                                with open(os.path.join(logs_folder_path, "debug_easy_apply_stuck.html"),
+                                                          "w", encoding="utf-8") as f:
+                                                    f.write((stuck_modal or driver).get_attribute("outerHTML")
+                                                            if stuck_modal else driver.page_source)
+                                                print_lg("Saved the stuck Easy Apply modal to logs/debug_easy_apply_stuck.html")
+                                            except Exception as dump_err:
+                                                logger.warning("Could not dump the stuck modal: %s", dump_err)
                                         errored = "stuck"
                                         raise Exception("Seems like stuck in a continuous loop of next, probably because of new questions.")
                                     questions_list = answer_questions(modal, questions_list, work_location, job_description=description)
