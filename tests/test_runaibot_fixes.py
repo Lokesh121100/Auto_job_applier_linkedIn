@@ -256,6 +256,70 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert today == 1
 
 
+# ------------- a dialog over the results list must not end the whole run -------------
+def test_intercepted_card_click_is_retried_after_closing_the_dialog(bot, monkeypatch):
+    '''Live, an open <dialog data-testid="dialog"> intercepted every job-card click and the
+    exception travelled out of apply_to_jobs, ending a run across all 12 search terms.'''
+    from selenium.common.exceptions import ElementClickInterceptedException
+    dismissed = []
+    clicks = []
+
+    class Card(FakeElement):
+        def __init__(self):
+            super().__init__()
+            self.children = {".//p": [FakeElement(text="Power Platform Developer"),
+                                      FakeElement(text="Acme"),
+                                      FakeElement(text="Chennai (Remote)")]}
+
+        def click(self):
+            clicks.append(1)
+            if len(clicks) == 1:                 # blocked until the dialog is closed
+                raise ElementClickInterceptedException("element click intercepted")
+
+        def get_dom_attribute(self, name):
+            return "job-card-component-ref-1" if name == "componentkey" else None
+
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "card_job_id", lambda card: "1")
+    monkeypatch.setattr(bot, "split_location", lambda text: ("Chennai", "Remote"))
+    monkeypatch.setattr(bot, "dismiss_open_dialog", lambda: dismissed.append(1) or True)
+
+    job_id, title, company, _loc, _style, skip = bot.get_ai_search_card_details(Card(), set(), set())
+    assert dismissed == [1], "did not try to close the dialog"
+    assert len(clicks) == 2, "did not retry the click after closing the dialog"
+    assert (title, company, skip) == ("Power Platform Developer", "Acme", False)
+
+
+def test_intercepted_click_still_raises_when_there_was_no_dialog_to_close(bot, monkeypatch):
+    '''With nothing covering the card the click is blocked for some other reason, so it must
+    surface rather than be silently retried forever.'''
+    from selenium.common.exceptions import ElementClickInterceptedException
+
+    class Card(FakeElement):
+        def __init__(self):
+            super().__init__()
+            self.children = {".//p": [FakeElement(text="Dev"), FakeElement(text="Acme"),
+                                      FakeElement(text="Chennai")]}
+
+        def click(self):
+            raise ElementClickInterceptedException("element click intercepted")
+
+        def get_dom_attribute(self, name):
+            return None
+
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "card_job_id", lambda card: "1")
+    monkeypatch.setattr(bot, "split_location", lambda text: ("Chennai", ""))
+    monkeypatch.setattr(bot, "dismiss_open_dialog", lambda: False)
+
+    with pytest.raises(ElementClickInterceptedException):
+        bot.get_ai_search_card_details(Card(), set(), set())
+
+
 # ------------------- referral targets: recent companies, correctly ordered ----------
 def write_history(path, rows):
     '''An applied-jobs history CSV holding just the columns load_referral_targets() reads.'''
