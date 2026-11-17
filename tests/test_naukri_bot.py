@@ -174,6 +174,10 @@ def one_job_run(naukri, monkeypatch):
     '''run() over a single job card, recording what gets written instead of touching a browser.'''
     job = {"title": "Java Developer", "company": "Acme", "link": "https://www.naukri.com/job-listings-9"}
     recorded = []
+    # run() bails out when no credentials are configured, so set dummy ones here rather than
+    # letting these tests depend on whatever is in the developer's own user_config.json.
+    monkeypatch.setattr(naukri, "naukri_username", "tester@example.com")
+    monkeypatch.setattr(naukri, "naukri_password", "not-a-real-password")
     monkeypatch.setattr(naukri, "driver", TextDriver({naukri.job_description_xpath: ["Java, Spring, Kafka"]}))
     monkeypatch.setattr(naukri, "login_naukri", lambda: True)
     monkeypatch.setattr(naukri, "search_terms", ["Java Developer"])
@@ -208,3 +212,66 @@ def test_good_match_job_is_applied_with_its_description_scored(naukri, monkeypat
     naukri.run()
     assert scored == ["Java, Spring, Kafka"]
     assert one_job_run[0][2] == "Applied (Naukri form)"
+
+
+# --------------------- a dead browser stops the run, it isn't a job failure ---------------------
+def test_browser_is_gone_recognises_a_dropped_driver_connection(naukri):
+    '''The live run died on a urllib3 ProtocolError, which is not a WebDriverException.'''
+    from urllib3.exceptions import ProtocolError
+    dropped = ProtocolError("Connection aborted.", ConnectionResetError(10054, "forcibly closed"))
+    assert naukri.browser_is_gone(dropped)
+
+
+def test_browser_is_gone_sees_through_a_wrapping_error(naukri):
+    try:
+        try:
+            raise ConnectionResetError(10054, "forcibly closed")
+        except ConnectionResetError as cause:
+            raise RuntimeError("while applying") from cause
+    except RuntimeError as wrapped:
+        assert naukri.browser_is_gone(wrapped)
+
+
+def test_browser_is_gone_is_false_for_an_ordinary_job_failure(naukri):
+    assert not naukri.browser_is_gone(ValueError("odd job page"))
+
+
+def test_run_stops_instead_of_recording_every_job_once_the_browser_dies(naukri, monkeypatch, one_job_run):
+    from urllib3.exceptions import ProtocolError
+    jobs = [{"title": f"Job {n}", "company": "Acme", "link": f"https://www.naukri.com/job-{n}"}
+            for n in range(5)]
+    monkeypatch.setattr(naukri, "collect_job_cards", lambda: jobs)
+    monkeypatch.setattr(naukri, "check_job_fit", lambda description: None)
+    monkeypatch.setattr(naukri, "apply_to_current_job",
+                        lambda: (_ for _ in ()).throw(ProtocolError("Connection aborted.")))
+    naukri.run()
+    assert one_job_run == [], "a dead browser was recorded as a per-job failure"
+
+
+def test_run_still_records_a_single_odd_job_as_failed(naukri, monkeypatch, one_job_run):
+    monkeypatch.setattr(naukri, "check_job_fit", lambda description: None)
+    monkeypatch.setattr(naukri, "apply_to_current_job",
+                        lambda: (_ for _ in ()).throw(ValueError("odd job page")))
+    naukri.run()
+    assert one_job_run[0][2] == "Failed - ValueError"
+
+
+# ------------------------- results pages are re-read before giving up -------------------------
+def test_wait_for_job_cards_retries_until_the_page_renders(naukri, monkeypatch):
+    reads = []
+    jobs = [{"title": "Java Developer", "company": "Acme", "link": "https://www.naukri.com/job-9"}]
+    def collect():
+        reads.append(1)
+        return jobs if len(reads) >= 3 else []
+    monkeypatch.setattr(naukri, "collect_job_cards", collect)
+    monkeypatch.setattr(naukri, "buffer", lambda *a: None)
+    assert naukri.wait_for_job_cards() == jobs
+    assert len(reads) == 3
+
+
+def test_wait_for_job_cards_gives_up_on_a_genuinely_empty_page(naukri, monkeypatch):
+    reads = []
+    monkeypatch.setattr(naukri, "collect_job_cards", lambda: reads.append(1) or [])
+    monkeypatch.setattr(naukri, "buffer", lambda *a: None)
+    assert naukri.wait_for_job_cards(attempts=4) == []
+    assert len(reads) == 4

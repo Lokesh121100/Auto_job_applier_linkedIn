@@ -23,6 +23,9 @@ are logged with their link for you to finish by hand, not counted as applied.
 import os
 import csv
 from datetime import datetime
+from http.client import HTTPException
+
+from urllib3.exceptions import HTTPError as Urllib3Error
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -44,6 +47,21 @@ from modules.career_ops import check_job_fit
 
 naukri_file_name = "all excels/naukri_applied_history.csv"
 naukri_fields = ['Date Applied', 'Title', 'Company', 'Status', 'Job Link']
+
+
+def browser_is_gone(error: BaseException) -> bool:
+    '''True when this error means the browser itself is gone, not that one job misbehaved.
+
+    Closing Chrome mid-run raises a urllib3/socket error from the driver's HTTP connection
+    (seen live: ProtocolError "connection forcibly closed by the remote host"). Those are
+    NOT WebDriverException subclasses, so without this check the run treated a dead browser
+    as a per-job failure and kept looping, recording a bogus "Failed" row for every
+    remaining job.'''
+    fatal = (NoSuchWindowException, WebDriverException, Urllib3Error, HTTPException, OSError)
+    while error is not None:
+        if isinstance(error, fatal): return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def get_recorded_naukri_links() -> set[str]:
@@ -166,6 +184,19 @@ def build_search_url(keyword: str, page: int, location: str | None = None) -> st
     else:
         base = f"https://www.naukri.com/{slug}-jobs"
     return base if page == 1 else f"{base}-{page}"
+
+
+def wait_for_job_cards(attempts: int = 4) -> list[dict]:
+    '''Job cards from the open results page, re-reading a few times before giving up.
+
+    Naukri renders its results client-side, so a single read right after `driver.get`
+    can land on an empty page and report "Found 0 job cards" for a search that does have
+    results (seen live: the first search of a run returned 0 while later ones returned 20).'''
+    for attempt in range(attempts):
+        jobs = collect_job_cards()
+        if jobs: return jobs
+        if attempt < attempts - 1: buffer(2)
+    return []
 
 
 def collect_job_cards() -> list[dict]:
@@ -314,10 +345,13 @@ def run() -> None:
             buffer(3)
 
             try:
-                jobs = collect_job_cards()
-            except (NoSuchWindowException, WebDriverException) as e:
-                logger.error("Browser closed or became invalid. Stopping Naukri run.", exc_info=e)
-                return
+                jobs = wait_for_job_cards()
+            except Exception as e:
+                if browser_is_gone(e):
+                    logger.error("Browser closed or became invalid. Stopping Naukri run.", exc_info=e)
+                    return
+                logger.warning("Could not read this results page, moving on. %s", type(e).__name__)
+                jobs = []
             print_lg(f"Found {len(jobs)} job cards.")
 
             for job in jobs:
@@ -328,10 +362,10 @@ def run() -> None:
                     driver.get(job["link"])
                     fit_skip = check_job_fit(read_job_description())
                     status = f"Skipped - {fit_skip}" if fit_skip else apply_to_current_job()
-                except (NoSuchWindowException, WebDriverException) as e:
-                    logger.error("Browser closed or became invalid. Stopping Naukri run.", exc_info=e)
-                    return
                 except Exception as e:
+                    if browser_is_gone(e):
+                        logger.error("Browser closed or became invalid. Stopping Naukri run.", exc_info=e)
+                        return
                     logger.warning("Failed on this job, skipping it. %s", type(e).__name__)
                     critical_error_log("In Naukri apply", e)
                     status = f"Failed - {type(e).__name__}"
