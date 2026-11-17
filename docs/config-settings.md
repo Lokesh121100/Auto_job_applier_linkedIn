@@ -41,6 +41,52 @@ Behaviour of the tool itself, rather than what it says in an application. Mostly
 | `auto_manage_driver` | `True` | Download and match the right Chrome driver automatically. If `False`, install a matching ChromeDriver yourself — see [install step 5](install.md#manual-install) |
 | `showAiErrorAlerts` | `False` | Alert on errors from the AI API connection |
 
+## Referral requests: ask employees for a referral after applying
+
+For each company you have **actually applied to**, the bot searches LinkedIn for people who
+work there and sends each a connection request carrying a short referral note. These are
+connection requests, not direct messages — messaging someone you aren't connected to needs
+Premium/InMail.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `referral_mode` | `False` | Send referral requests and **apply to nothing**. A run does referrals only |
+| `send_referrals_after_applying` | `False` | After an applying run finishes, ask for referrals at the companies just applied to. One Start does both |
+| `referral_daily_limit` | `15` | Most requests to send in one day, across all runs |
+| `referrals_per_company` | `2` | Most people to contact per company (the hiring manager counts as one) |
+| `referral_role_keywords` | `Developer, Engineer, Recruiter` | People are found by searching `"<company> <keyword>"` for each of these, in order |
+| `referral_message` | see file | The note sent with each request. Max 200 characters; longer notes are shortened. Placeholders: `{first_name}` (theirs), `{job_title}`, `{company}`, `{my_name}` |
+| `referral_require_note` | `True` | Skip people when LinkedIn's note quota is used up, rather than sending a request with no note |
+| `referral_file_name` | `"all excels/referrals_history.csv"` | Every request is recorded here, so **nobody is contacted twice** |
+
+### The monthly note quota
+
+LinkedIn's free plan allows only a handful of **personalised** invitations per month. Once
+used up, LinkedIn still offers to send the invitation — just without your note. A bare
+request tells the person nothing about which job you applied for or why you're asking, so
+it rarely earns a referral, and it still spends your weekly invitation allowance.
+
+`referral_require_note = True` skips those people instead, leaving them free to ask properly
+once the quota resets. Set it to `False` to send noteless requests anyway.
+
+### Protecting your account
+
+**LinkedIn restricts accounts that send too many invitations** — roughly 100 a week is the
+commonly cited ceiling, and repeated ignored requests count against you. Keep
+`referral_daily_limit` low (10–20). Every outcome is written to the referrals CSV, including
+why someone was skipped, so you can see what actually went out:
+
+```
+Sent with note
+Sent without note (note quota used up or not offered)
+Skipped - note quota used up (referral_require_note is on)
+Skipped - no Connect button (already connected, pending, or follow-only)
+Skipped - they only accept requests from people who know their email
+```
+
+"No Connect button" is normal and usually means you are already connected or a request is
+already pending.
+
 ## Job scoring: skip jobs that don't match your resume
 
 The **Job scoring** tab of the control panel. Before applying, the bot reads the job

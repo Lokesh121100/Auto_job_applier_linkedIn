@@ -1932,9 +1932,10 @@ def record_referral(company: str, job_title: str, person: str, profile_link: str
 
 def send_connection_request(person_name: str, note: str) -> str:
     '''
-    On the open profile page, clicks Connect for `person_name`, adds `note` and sends. Falls back
-    to sending without a note when LinkedIn's free note quota is used up. Returns the action
-    taken, starting with "Sent" only when a request actually went out.
+    On the open profile page, clicks Connect for `person_name`, adds `note` and sends. When
+    LinkedIn's free note quota is used up it offers to send without the note: that person is
+    skipped if `referral_require_note` is on, otherwise the bare request goes out. Returns the
+    action taken, starting with "Sent" only when a request actually went out.
     '''
     # Only the profile's own button: its aria-label is "Invite <name> to connect", while the
     # "People also viewed" sidebar has Connect buttons for other people.
@@ -2001,6 +2002,11 @@ def send_connection_request(person_name: str, note: str) -> str:
             save_page_once("invite_after_add_note")
         without_note = invite_button(scope, "send without")
         if without_note:
+            if referral_require_note:
+                # A bare request says nothing about which job or why, so it rarely earns a
+                # referral, and it still spends the weekly invitation allowance. Leave them
+                # uncontacted instead: the quota resets and they can be asked properly later.
+                return "Skipped - note quota used up (referral_require_note is on)"
             without_note.click()
             buffer(click_gap)
             return "Sent without note (note quota used up or not offered)"

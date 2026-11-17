@@ -121,6 +121,12 @@ referral_role_keywords = ["Developer", "Engineer", "Recruiter"]
 # Placeholders: {first_name} (theirs), {job_title}, {company}, {my_name}.
 referral_message = "Hi {first_name}, I just applied for the {job_title} role at {company}. Would you be open to referring me? Happy to share my resume. Thank you, {my_name}"
 
+# LinkedIn's free plan allows only a handful of personalised invitations a month. Once that
+# quota is used up it offers to send the request WITHOUT your note - a bare request from a
+# stranger, which rarely earns a referral and still spends your weekly invitation allowance.
+# True skips that person instead, leaving them free to contact next month when the quota resets.
+referral_require_note = True        # True or False, Note: True or False are case-sensitive
+
 # Where every request sent is recorded, so nobody is contacted twice.
 referral_file_name = "all excels/referrals_history.csv"
 

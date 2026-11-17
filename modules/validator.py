@@ -197,6 +197,17 @@ def validate_settings() -> None | ValueError | TypeError:
     check_boolean(run_in_background, "run_in_background")
     check_boolean(disable_extensions, "disable_extensions")
     check_boolean(safe_mode, "safe_mode")
+    # Referral requests. Unvalidated until now, so a bad value here crashed mid-run - after
+    # applications had already gone out, which is the worst moment to stop.
+    check_boolean(referral_mode, "referral_mode")
+    check_boolean(send_referrals_after_applying, "send_referrals_after_applying")
+    check_boolean(referral_require_note, "referral_require_note")
+    check_int(referral_daily_limit, "referral_daily_limit", 1)
+    check_int(referrals_per_company, "referrals_per_company", 1)
+    check_list(referral_role_keywords, "referral_role_keywords")
+    check_string(referral_message, "referral_message", min_length=1)
+    check_string(referral_file_name, "referral_file_name", min_length=1)
+
     check_boolean(career_ops_scoring, "career_ops_scoring")
     check_int(career_ops_min_score, "career_ops_min_score")
     if career_ops_min_score > 100: raise ValueError(f'career_ops_min_score is {career_ops_min_score}, it must be 100 or less.')

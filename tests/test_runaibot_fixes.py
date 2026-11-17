@@ -252,6 +252,76 @@ def test_referral_history_counts_only_sent_requests_towards_limits(bot, tmp_path
     assert today == 1
 
 
+# --------------------- the monthly note quota: skip rather than send blank -----------
+@pytest.fixture
+def quota_used_up(bot, monkeypatch):
+    '''send_connection_request() on a profile where LinkedIn offers "Send without a note".
+
+    That is what it shows once the free monthly personalised-invite quota is spent: the
+    Add-a-note button is there, but clicking it yields no textarea.
+    '''
+    clicked = []
+
+    class Btn(FakeElement):
+        def __init__(self, label):
+            super().__init__(text=label)
+            self.label = label
+
+        def click(self):
+            clicked.append(self.label)
+
+    connect = Btn("connect")
+    connect.get_attribute = lambda name: (
+        "https://www.linkedin.com/custom-invite/?vanityName=x" if name == "href" else None)
+
+    buttons = {"add a note": Btn("add a note"), "send without": Btn("send without")}
+
+    class Driver:
+        page_source = ""
+
+        def find_elements(self, by, xpath):
+            return [connect] if "to connect" in xpath else []
+
+    monkeypatch.setattr(bot, "driver", Driver())
+    monkeypatch.setattr(bot, "pick_first_displayed", lambda els: els[0] if els else None)
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "save_page_once", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "click_gap", 0)
+    monkeypatch.setattr(bot, "actions", types.SimpleNamespace(
+        send_keys=lambda *a: types.SimpleNamespace(perform=lambda: None)))
+    # No note textarea ever appears - this is the quota-exhausted page.
+    monkeypatch.setattr(bot, "invite_button",
+                        lambda scope, label, exact=False: buttons.get(label))
+    return clicked
+
+
+def test_note_quota_used_up_skips_the_person_when_a_note_is_required(bot, monkeypatch, quota_used_up):
+    monkeypatch.setattr(bot, "referral_require_note", True)
+    result = bot.send_connection_request("Asha Kumar", "Hi Asha, I just applied...")
+    assert result.startswith("Skipped - note quota used up")
+    assert "send without" not in quota_used_up, "sent a noteless request anyway"
+
+
+def test_note_quota_used_up_still_sends_when_a_note_is_not_required(bot, monkeypatch, quota_used_up):
+    monkeypatch.setattr(bot, "referral_require_note", False)
+    result = bot.send_connection_request("Asha Kumar", "Hi Asha, I just applied...")
+    assert result.startswith("Sent without note")
+    assert "send without" in quota_used_up
+
+
+def test_a_quota_skip_does_not_count_towards_the_daily_limit(bot, tmp_path, monkeypatch):
+    '''Only rows starting with "Sent" count, so a skipped person is neither charged against
+    today's limit nor marked contacted - they can be asked once the quota resets.'''
+    monkeypatch.setattr(bot, "referral_file_name", str(tmp_path / "referrals.csv"))
+    bot.record_referral("GIVA", "Analyst", "Asha K", "https://www.linkedin.com/in/asha",
+                        "People search", "Skipped - note quota used up (referral_require_note is on)")
+    contacted, per_company, today = bot.load_referral_history()
+    assert contacted == set()
+    assert per_company == {}
+    assert today == 0
+
+
 # ------------------------------- N: location via URL, not the UI box ----------------
 def test_jobs_search_url_includes_both_keywords_and_location(bot, monkeypatch):
     monkeypatch.setattr(bot, "search_location", "Singapore")
