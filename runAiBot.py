@@ -1806,8 +1806,14 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                 print_lg(f"A new tab opened ({how}) - external application.")
                                 break
                             if outcome != "modal":
+                                # Say what the browser looked like, not just that nothing happened: the same
+                                # two jobs time out on every run, and "nothing appeared" cannot tell a blocked
+                                # popup (tabs unchanged, still on LinkedIn) from a same-tab navigation (URL
+                                # moved off LinkedIn) from a click that did nothing.
+                                try: state = f"tabs {len(driver.window_handles)} (was {tabs_open}), url {driver.current_url[:80]}"
+                                except Exception: state = "browser state unreadable"
                                 raise NoSuchElementException(
-                                    "neither a new tab nor the Easy Apply modal appeared")
+                                    f"neither a new tab nor the Easy Apply modal appeared ({state})")
                             is_easy_apply = True
                             print_lg(f"Easy Apply detected ({how}).")
                             break
