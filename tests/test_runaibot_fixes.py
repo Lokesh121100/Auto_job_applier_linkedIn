@@ -225,6 +225,55 @@ def test_a_question_with_no_configured_answer_is_left_empty_not_guessed(bot, mon
     assert "What is your favourite colour?" in bot.unanswered_questions
 
 
+def test_a_stale_pagination_element_is_reread_not_taken_for_a_dead_browser(bot, monkeypatch):
+    '''Live, the 11-19 run ended mid-way with "The browser window was closed or the session became
+    invalid" while Chrome was fine: the pagination element read at the top of the page had gone
+    stale after ~25 jobs, StaleElementReferenceException is a WebDriverException, and the page
+    turn only expected NoSuchElementException.'''
+    from selenium.common.exceptions import StaleElementReferenceException
+    clicked = []
+    next_button = FakeElement()
+    fresh = FakeElement(children={".//button[@aria-label='Page 3']": next_button})
+
+    class Stale(FakeElement):
+        def find_element(self, by, locator):
+            raise StaleElementReferenceException("stale element reference")
+
+    monkeypatch.setattr(bot, "get_page_info", lambda: (fresh, 2))
+    monkeypatch.setattr(bot, "click_through_overlays", lambda element: clicked.append(element))
+    assert bot.turn_page(Stale(), 2) is True
+    assert clicked == [next_button]
+
+
+def test_no_next_page_button_means_the_end_of_the_results(bot, monkeypatch):
+    monkeypatch.setattr(bot, "click_through_overlays", lambda element: pytest.fail("clicked something"))
+    assert bot.turn_page(FakeElement(), 5) is False
+
+
+def test_a_pagination_element_that_stays_unreadable_ends_the_search_not_the_run(bot, monkeypatch):
+    from selenium.common.exceptions import StaleElementReferenceException
+
+    class Stale(FakeElement):
+        def find_element(self, by, locator):
+            raise StaleElementReferenceException("stale element reference")
+
+    monkeypatch.setattr(bot, "get_page_info", lambda: (None, None))
+    assert bot.turn_page(Stale(), 2) is False                 # returns, does not raise
+
+    monkeypatch.setattr(bot, "get_page_info", lambda: (Stale(), 2))
+    assert bot.turn_page(Stale(), 2) is False                 # still stale after one re-read
+
+
+def test_every_stalled_form_gets_its_own_dump_up_to_a_cap(bot):
+    '''One dump per run kept only the first stall. The first live stall was a CTC box LinkedIn
+    rejected; the second had no recognised question at all, and its markup was never saved, so
+    there was nothing to fix it from.'''
+    source = inspect.getsource(bot.apply_to_jobs)
+    assert bot.MAX_STUCK_DUMPS >= 5
+    assert 'f"debug_easy_apply_stuck_{job_id}.html"' in source, "dumps overwrite each other again"
+    assert "saved_stuck < MAX_STUCK_DUMPS" in source
+
+
 def test_a_failed_submit_click_is_never_recorded_as_applied(bot):
     '''When Submit could not be clicked and nothing else was flagged, no reason was set, nothing
     raised, and the job fell through to submitted_jobs() as "Easy Applied" with Date Applied

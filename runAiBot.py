@@ -361,6 +361,29 @@ def apply_filters() -> None:
 
 
 
+def turn_page(pagination_element: WebElement, current_page: int) -> bool:
+    '''Clicks "Page N+1". False when there is no next page, i.e. the end of the results.
+
+    The pagination element is read once at the top of each results page, and by the time ~25
+    jobs have been opened and closed the results have re-rendered and it is stale. That used to
+    escape as a StaleElementReferenceException, which is a WebDriverException, so the run took
+    it for a dead browser ("The browser window was closed or the session became invalid") and
+    ended - partway through a 24-search run, with Chrome perfectly healthy. Re-read it instead.
+    '''
+    for _ in range(2):
+        try:
+            click_through_overlays(pagination_element.find_element(
+                By.XPATH, f".//button[@aria-label='Page {current_page+1}']"))
+            return True
+        except NoSuchElementException:
+            return False
+        except StaleElementReferenceException:
+            pagination_element, fresh_page = get_page_info()
+            if pagination_element is None or fresh_page is None: return False
+            current_page = fresh_page
+    return False
+
+
 def get_page_info() -> tuple[WebElement | None, int | None]:
     '''
     Function to get pagination element and current page number
@@ -1398,6 +1421,10 @@ discard_button_xpath = ".//button[@data-control-name='discard_application_confir
 # found no apply button there either and recorded "Failed to apply!". That is why a run could
 # submit zero Easy Apply applications while the modal was opening every time. The old class
 # stays as the fallback for the classic layout.
+# Most stalled-form dumps kept per run. Each is the modal's own markup (a few KB), so this bounds
+# disk use while still sampling several different forms in one run.
+MAX_STUCK_DUMPS = 8
+
 EASY_APPLY_MODAL_XPATH = ("//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.jobs.easyapply.EasyApply']"
                           " | //*[contains(@class,'jobs-easy-apply-modal')]")
 
@@ -1815,17 +1842,25 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                         # layout randomises its classes, so the only way to find out
                                         # which field selectors have gone stale is to read the real
                                         # thing - a picture of it cannot be grepped for a locator.
-                                        if "easy_apply_stuck" not in referral_pages_saved:
-                                            referral_pages_saved.add("easy_apply_stuck")
+                                        # One dump PER STALLED JOB (capped), not one per run: different jobs
+                                        # have different forms, and a single sample cannot show which of them
+                                        # the field finder still misses. Seen live - the first stall was a
+                                        # CTC box LinkedIn rejected, the second had no recognised question at
+                                        # all, and only the first was ever kept.
+                                        stuck_key = f"easy_apply_stuck_{job_id}"
+                                        saved_stuck = sum(1 for k in referral_pages_saved if k.startswith("easy_apply_stuck_"))
+                                        if stuck_key not in referral_pages_saved and saved_stuck < MAX_STUCK_DUMPS:
+                                            referral_pages_saved.add(stuck_key)
                                             try:
                                                 stuck_modal = find_easy_apply_modal(2)
-                                                with open(os.path.join(logs_folder_path, "debug_easy_apply_stuck.html"),
-                                                          "w", encoding="utf-8") as f:
-                                                    f.write((stuck_modal or driver).get_attribute("outerHTML")
-                                                            if stuck_modal else driver.page_source)
-                                                print_lg("Saved the stuck Easy Apply modal to logs/debug_easy_apply_stuck.html")
+                                                dump_name = f"debug_easy_apply_stuck_{job_id}.html"
+                                                with open(os.path.join(logs_folder_path, dump_name), "w", encoding="utf-8") as f:
+                                                    f.write(stuck_modal.get_attribute("outerHTML") if stuck_modal else driver.page_source)
+                                                print_lg(f"Saved the stuck Easy Apply modal to logs/{dump_name}")
                                             except Exception as dump_err:
                                                 logger.warning("Could not dump the stuck modal: %s", dump_err)
+                                        if not questions_list:
+                                            print_lg("No question was recognised on this Easy Apply step - the form is a layout the field finder does not know yet.")
                                         errored = "stuck"
                                         raise Exception("Seems like stuck in a continuous loop of next, probably because of new questions.")
                                     questions_list = answer_questions(modal, questions_list, work_location, job_description=description)
@@ -1953,13 +1988,12 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                 if pagination_element == None:
                     print_lg("Couldn't find pagination element, probably at the end page of results!")
                     break
-                try:
-                    # Through the overlay helper: live, the same open dialog that blocked the
-                    # job cards also intercepted this button, so paging stopped at page 1.
-                    click_through_overlays(pagination_element.find_element(
-                        By.XPATH, f".//button[@aria-label='Page {current_page+1}']"))
+                # turn_page() goes through the overlay helper (the same open dialog that blocked the
+                # job cards also intercepted this button, so paging once stopped at page 1) and
+                # survives the pagination element going stale while the page was being worked.
+                if turn_page(pagination_element, current_page):
                     print_lg(f"\n>-> Now on Page {current_page+1} \n")
-                except NoSuchElementException:
+                else:
                     print_lg(f"\n>-> Didn't find Page {current_page+1}. Probably at the end page of results!\n")
                     break
 
