@@ -1141,8 +1141,9 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         # alone is a true answer, and the combined "400000 / 800000" this used to send was
                         # rejected live with "Invalid input" - the box takes one number - so Review never
                         # advanced and the application stalled. Leave it empty: the job is skipped with
-                        # the question named, and nothing doubtful goes to an employer. An answer can
-                        # still be configured for such a question in config/questions.py.
+                        # the question named, and nothing doubtful goes to an employer. Nothing in
+                        # config/questions.py maps an arbitrary question to an answer today, so a
+                        # job asking this stays skipped.
                         print_lg(f'"{label_org}" asks for two figures in one box; not guessing which one. Leaving it unanswered.')
                     elif label_has(label, 'current', 'present'):
                         if label_has(label, 'month', 'months', 'monthly'):
