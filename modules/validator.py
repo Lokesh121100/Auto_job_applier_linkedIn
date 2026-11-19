@@ -190,6 +190,7 @@ def validate_settings() -> None | ValueError | TypeError:
 
     check_string(file_name, "file_name", min_length=1)
     check_string(failed_file_name, "failed_file_name", min_length=1)
+    check_string(needs_answer_file_name, "needs_answer_file_name", min_length=1)
     check_string(logs_folder_path, "logs_folder_path", min_length=1)
 
     check_int(click_gap, "click_gap", 0)

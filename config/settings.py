@@ -62,6 +62,11 @@ generated_resume_path = "all resumes/" # (In Development)
 # Directory and name of the files where history of applied jobs is saved (Sentence after the last "/" will be considered as the file name).
 file_name = "all excels/all_applied_applications_history.csv"
 failed_file_name = "all excels/all_failed_applications_history.csv"
+
+# Easy Apply jobs the bot could not finish because a question had no answer, one row per job and
+# question, so it is a to-do list on its own instead of being buried among thousands of other
+# skipped and failed jobs. A job appears once however many runs meet it again.
+needs_answer_file_name = "all excels/easy_apply_needs_answer.csv"
 logs_folder_path = "logs/"
 
 # How much detail to write to logs/log.txt and print while the tool runs.

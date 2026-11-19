@@ -99,9 +99,57 @@ class StoppedBeforeSubmit(Exception):
 
 class UnansweredQuestions(Exception):
     '''
-    Raised when required questions have no answer in `config/questions.py`. The job is
-    skipped, not failed - there is nothing broken to retry, the user has to add answers.
+    Raised when required questions have no answer the bot can give. It never guesses, so the job
+    is skipped, not failed - nothing is broken - and its questions go to the needs-answer sheet
+    (`needs_answer_file_name`) for the user to finish the application by hand.
     '''
+
+
+needs_answer_fields = ['Date Found', 'Job ID', 'Title', 'Company', 'Job Link', 'Question', 'Options', 'Your Answer']
+
+
+def clean_question_for_sheet(raw: str) -> tuple[str, str]:
+    '''(question, options) from the text the question branches record.
+
+    Radio and dropdown questions are recorded as 'Question [  "Yes"<on>, "No"<on>, ]', which is
+    unreadable in a spreadsheet: the <on> is an internal value and the brackets are bookkeeping.
+    '''
+    question, _, rest = raw.partition(' [ ')
+    options = [o for o in re.findall(r'"([^"]*)"', rest) if o and o != "Select an option"]
+    shown = " / ".join(options[:8]) + (" / ..." if len(options) > 8 else "")
+    return question.strip(), shown
+
+
+def record_needs_answer(job_id: str, title: str, company: str, job_link: str, questions) -> None:
+    '''Adds one row per unanswered question to the needs-answer sheet, skipping any (job, question)
+    already there. The same job is met again on every run, so without that check the sheet would
+    grow by the same rows each time. Never raises: a sheet held open in Excel must not stop a run.'''
+    try:
+        folder = os.path.dirname(needs_answer_file_name)
+        if folder: os.makedirs(folder, exist_ok=True)
+        seen: set[tuple[str, str]] = set()
+        try:
+            with open(needs_answer_file_name, encoding='utf-8') as csv_file:
+                seen = {(row['Job ID'], row['Question']) for row in csv.DictReader(csv_file)}
+        except FileNotFoundError:
+            pass
+        new_rows = []
+        for raw in sorted(set(questions)):
+            question, options = clean_question_for_sheet(raw)
+            if (str(job_id), question) in seen: continue
+            seen.add((str(job_id), question))
+            new_rows.append({'Date Found': datetime.now().strftime("%Y-%m-%d %H:%M"), 'Job ID': job_id,
+                             'Title': truncate_for_csv(title), 'Company': truncate_for_csv(company),
+                             'Job Link': job_link, 'Question': truncate_for_csv(question),
+                             'Options': options, 'Your Answer': ''})
+        if not new_rows: return
+        with open(needs_answer_file_name, mode='a', newline='', encoding='utf-8') as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=needs_answer_fields)
+            if csv_file.tell() == 0: writer.writeheader()
+            writer.writerows(new_rows)
+    except Exception as e:
+        logger.error("Failed to record the unanswered questions!", exc_info=e)
+
 
 class BlacklistedCompanyFound(Exception):
     '''Raised by `check_blacklist` only for a real bad-word hit in About Company. Kept apart from
@@ -1184,7 +1232,7 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         # and "How many people did you manage?" were all submitted as the
                         # user's total years of experience - wrong data on a real
                         # application. Report it and let the stall guard skip the job.
-                        print_lg(f'No answer for the text question "{label_org}". Leaving it empty - add it to config/questions.py.')
+                        print_lg(f'No answer for the text question "{label_org}". Leaving it empty: the bot never guesses, so this job is skipped and listed in the needs-answer sheet.')
                         randomly_answered_questions.add((label_org, "text"))
                         unanswered_questions.add(label_org)
                 text.clear()
@@ -1909,7 +1957,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                     if not pause_at_failed_question and questions_are_stalled(blocked_questions):
                                         errored = "stuck"
                                         raise UnansweredQuestions(
-                                            'Skipping "{}" - no answer in config/questions.py for:\n  {}'.format(
+                                            'Skipping "{}" - the bot has no answer for:\n  {}'.format(
                                                 title, "\n  ".join(sorted(unanswered_questions))))
                                     blocked_questions = set(unanswered_questions)
                                     if useNewResume and not uploaded: uploaded, resume = upload_resume(modal, default_resume_path)
@@ -1977,10 +2025,13 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
 
                         except UnansweredQuestions as e:
                             print_lg(str(e))
-                            print_lg("Add those answers to config/questions.py and re-run to apply to this job.")
-                            # Was silently dropped here before - not saved anywhere, so there was
-                            # no way to find this job again later. Now recorded alongside every
-                            # other failed/skipped job, with the unanswered question as the reason.
+                            # Its own sheet, one row per question, so the jobs to finish by hand are not
+                            # buried among thousands of other skipped and failed rows. (The old advice
+                            # printed here - "add those answers to config/questions.py" - described a
+                            # setting that does not exist.)
+                            record_needs_answer(job_id, title, company, job_link, unanswered_questions)
+                            print_lg(f"Saved to {needs_answer_file_name}: finish this one by hand.")
+                            # Also kept in the failed-applications file as before, with the question as the reason.
                             failed_job(job_id, job_link, resume, date_listed, str(e), "", application_link, screenshot_name)
                             skip_count += 1
                             discard_job()

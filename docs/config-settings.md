@@ -24,7 +24,8 @@ Behaviour of the tool itself, rather than what it says in an application. Mostly
 | Setting | What it is |
 |---|---|
 | `file_name` | Where the applied-jobs history CSV is written, e.g. `"all excels/all_applied_applications_history.csv"`. Everything after the last `/` is the filename |
-| `failed_file_name` | Same, for failed applications |
+| `failed_file_name` | Same, for failed applications. Also holds jobs skipped for too much experience or a low Career-Ops match, so it is long and mixed |
+| `needs_answer_file_name` | `"all excels/easy_apply_needs_answer.csv"`. Easy Apply jobs the bot could not finish because a question had no answer: **one row per job and question**, with the job link and the answer options. It is a to-do list for applying by hand. A job appears once however many runs meet it again, and the `Your Answer` column is blank for your own notes (the bot does not read it). Keep it closed in Excel while a run is going, or copy it first |
 | `logs_folder_path` | Where run logs go, e.g. `"logs/"` |
 | `log_level` | How much detail is written to `logs/log.txt` and printed while the tool runs: `"DEBUG"` for everything, `"INFO"` for the normal running commentary, `"WARNING"` for only what went wrong, `"ERROR"` for only crashes. Case-insensitive; anything unrecognised falls back to `"INFO"` |
 

@@ -382,6 +382,86 @@ def test_a_radio_click_falls_back_to_the_dom_when_a_real_click_is_refused(bot, m
     assert len(scripts) == 1 and "click()" in scripts[0][0] and scripts[0][1] == (option,)
 
 
+# ----- the "needs an answer" sheet: Easy Apply jobs to finish by hand, in a file of their own -----
+def test_a_radio_question_is_cleaned_for_a_spreadsheet(bot):
+    '''Recorded as 'Q [  "Yes"<on>, "No"<on>, ]': the <on> is an internal value and the brackets
+    are bookkeeping, neither of which belongs in a cell.'''
+    raw = 'Do you have experience in Production Support? [  "Yes"<on>, "No"<on>, ]'
+    assert bot.clean_question_for_sheet(raw) == ("Do you have experience in Production Support?", "Yes / No")
+
+
+def test_a_text_question_has_no_options(bot):
+    assert bot.clean_question_for_sheet("What is your current and expected ctc ?") == (
+        "What is your current and expected ctc ?", "")
+
+
+def test_a_dropdown_drops_its_placeholder_and_caps_a_long_list(bot):
+    raw = 'Country code [ "Select an option", ' + ", ".join(f'"C{n}"' for n in range(20)) + ", ]"
+    question, options = bot.clean_question_for_sheet(raw)
+    assert question == "Country code"
+    assert "Select an option" not in options
+    assert options.endswith("...") and options.count("/") <= 8
+
+
+@pytest.fixture
+def sheet(bot, tmp_path, monkeypatch):
+    path = tmp_path / "needs.csv"
+    monkeypatch.setattr(bot, "needs_answer_file_name", str(path))
+    return path
+
+
+def read_sheet(path):
+    import csv as _csv
+    with open(path, encoding="utf-8") as f:
+        return list(_csv.DictReader(f))
+
+
+def test_each_unanswered_question_becomes_its_own_row_with_the_job_details(bot, sheet):
+    bot.record_needs_answer("4483448333", "Solutions Architect", "Kissflow", "https://www.linkedin.com/jobs/view/4483448333/",
+                            ['Prior experience with low-code? [  "Yes"<on>, "No"<on>, ]',
+                             'Do you have experience in advisory? [  "Yes"<on>, "No"<on>, ]'])
+    rows = read_sheet(sheet)
+    assert len(rows) == 2
+    assert {r["Question"] for r in rows} == {"Prior experience with low-code?", "Do you have experience in advisory?"}
+    assert all(r["Job ID"] == "4483448333" and r["Company"] == "Kissflow" for r in rows)
+    assert all(r["Options"] == "Yes / No" for r in rows)
+    assert all(r["Your Answer"] == "" for r in rows), "the answer column is for the user, left blank"
+    assert all(r["Job Link"].endswith("/4483448333/") for r in rows)
+
+
+def test_meeting_the_same_job_again_on_a_later_run_adds_nothing(bot, sheet):
+    '''Failed jobs are retried on every run, so without this the same rows would be added again
+    each time - the very clutter this sheet exists to avoid.'''
+    args = ("4486334684", "AI Engineer", "IT Digital", "https://example/4486334684", ["What is your current and expected ctc ?"])
+    bot.record_needs_answer(*args)
+    bot.record_needs_answer(*args)
+    bot.record_needs_answer(*args)
+    assert len(read_sheet(sheet)) == 1
+
+
+def test_a_new_question_on_a_known_job_is_added_and_the_header_is_written_once(bot, sheet):
+    bot.record_needs_answer("1", "Role", "Co", "link", ["First question?"])
+    bot.record_needs_answer("1", "Role", "Co", "link", ["First question?", "Second question?"])
+    bot.record_needs_answer("2", "Other", "Co2", "link2", ["First question?"])
+    assert [(r["Job ID"], r["Question"]) for r in read_sheet(sheet)] == [
+        ("1", "First question?"), ("1", "Second question?"), ("2", "First question?")]
+    assert sheet.read_text(encoding="utf-8").count("Date Found") == 1
+
+
+def test_a_sheet_held_open_in_excel_never_stops_a_run(bot, monkeypatch):
+    '''Excel locks a file it has open on Windows, and the bot appends to this one mid-run.'''
+    monkeypatch.setattr(bot, "needs_answer_file_name", "all excels/locked.csv")
+    monkeypatch.setattr(bot.os, "makedirs", lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked")))
+    bot.record_needs_answer("1", "Role", "Co", "link", ["A question?"])      # returns, does not raise
+
+
+def test_the_unanswered_questions_handler_writes_the_sheet(bot):
+    source = inspect.getsource(bot.apply_to_jobs)
+    handler = source.split("except UnansweredQuestions as e:", 1)[1].split("except Exception as e:", 1)[0]
+    assert "record_needs_answer(job_id, title, company, job_link, unanswered_questions)" in handler
+    assert "failed_job(" in handler, "must still be kept in the failed file as before"
+
+
 def test_every_stalled_form_gets_its_own_dump_up_to_a_cap(bot):
     '''One dump per run kept only the first stall. The first live stall was a CTC box LinkedIn
     rejected; the second had no recognised question at all, and its markup was never saved, so
