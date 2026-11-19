@@ -74,8 +74,8 @@ except Exception as e:
 for name in ("current_ctc", "desired_salary", "notice_period"):
     value = getattr(questions, name, None)
     check("PASS" if value not in (None, "") else "FAIL", f"{name} is set", repr(value))
-check("PASS", "answer for a 'current and expected ctc' box",
-      f'"{questions.current_ctc} / {questions.desired_salary}"')
+check("PASS", "a 'current and expected ctc' box",
+      "left unanswered and the job skipped (one number cannot answer both; never guessed)")
 
 # 5. The history file the bot appends to: it must exist with the columns it writes.
 history = settings.file_name

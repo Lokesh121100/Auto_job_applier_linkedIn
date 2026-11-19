@@ -191,21 +191,25 @@ def answer_new_layout(bot, monkeypatch, *question_texts):
     return typed
 
 
-def test_the_two_questions_that_stalled_a_real_application_are_now_answered(bot, monkeypatch, money):
-    '''Captured live at step 4 of 5: both boxes required, both empty, "Invalid input", and the
-    bot looped on Review until it gave up.'''
+def test_the_questions_that_stalled_a_real_application_are_now_seen_and_the_answerable_one_filled(bot, monkeypatch, money):
+    '''Captured live at step 4 of 5: both boxes required and empty, and the bot looped on Review
+    until it gave up because it never saw either. It now sees both: the notice period is answered,
+    and the two-figure CTC box is deliberately left for the skip path (next test).'''
+    bot.unanswered_questions.clear()
     typed = answer_new_layout(bot, monkeypatch,
                               "What is your current and expected ctc ?*",
                               "What is your notice period?*")
-    assert typed == ["400000 / 800000", "15"]
+    assert typed == ["", "15"]
 
 
-def test_a_current_and_expected_ctc_box_gets_both_figures_and_fits_twenty_characters(bot, monkeypatch, money):
-    '''Answering "current and expected" with the current figure alone would send half an answer
-    to a real employer. The box on the live page allowed 20 characters.'''
-    (answer,) = answer_new_layout(bot, monkeypatch, "What is your current and expected ctc ?*")
-    assert "400000" in answer and "800000" in answer
-    assert len(answer) <= 20
+def test_a_current_and_expected_ctc_box_is_left_unanswered_not_guessed(bot, monkeypatch, money):
+    '''Neither figure alone is a true answer, and sending both as "400000 / 800000" was rejected
+    live with "Invalid input" (the box takes one number), which stalled the application. Leaving
+    it empty gets the job skipped with the question named, and nothing doubtful reaches an employer.'''
+    bot.unanswered_questions.clear()
+    typed = answer_new_layout(bot, monkeypatch, "What is your current and expected ctc ?*")
+    assert typed == [""]
+    assert "What is your current and expected ctc ?" in bot.unanswered_questions
 
 
 @pytest.mark.parametrize("question, expected", [
