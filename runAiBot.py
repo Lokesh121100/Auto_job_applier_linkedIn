@@ -897,7 +897,13 @@ def find_question_elements(modal: WebElement) -> list[WebElement]:
     if questions: return questions
     found: list[WebElement] = []
     for field in modal.find_elements(By.XPATH, NEW_LAYOUT_FIELD_XPATH):
-        try: container = field.find_element(By.XPATH, "..")
+        # The key sits in two places. A text box: on a child of the question, whose <p> is a sibling
+        # in the PARENT. A radio group: on the container that already holds its own <p> (seen live
+        # on a "Do you have experience with ...?" Yes/No form), where taking the parent instead
+        # merged every question on the step into one container and recognised none of them.
+        try:
+            has_own_question = bool(field.find_elements(By.XPATH, "./p"))
+            container = field if has_own_question else field.find_element(By.XPATH, "..")
         except WebDriverException: continue
         if container not in found: found.append(container)
     return found
@@ -910,7 +916,9 @@ def read_question_label(question: WebElement) -> str:
         # Classic layout, unchanged: the visually-hidden span holds the clean text.
         try: label = label.find_element(By.CLASS_NAME, 'visually-hidden')
         except Exception: pass
-        return label.text
+        # A radio option's <label for> is EMPTY on the 2026 modal, and it is the first one found
+        # in a radio question - returning its text would give every such question no text at all.
+        if (label.text or "").strip(): return label.text
     # New layout: the field repeats its question as its aria-label, which has no trailing "*".
     field = try_xp(question, ".//*[(self::input or self::textarea) and @aria-label]", False)
     text = ((field.get_attribute("aria-label") if field else "") or "").strip()
@@ -918,6 +926,25 @@ def read_question_label(question: WebElement) -> str:
         paragraph = try_xp(question, ".//p", False)
         text = ((paragraph.text if paragraph else "") or "").strip()
     return text.rstrip("*").strip() or "Unknown"
+
+
+def radio_option_text(radio: WebElement, option: WebElement) -> str:
+    '''Visible text of one radio option: the <label for> on the classic layout. On the 2026 modal
+    that label is empty (it is only the clickable box) and the words "Yes" / "No" are a <p> in
+    the option's row, two <div>s up from the <input>.'''
+    label = try_xp(radio, f'.//label[@for="{option.get_attribute("id")}"]', False)
+    if label and (label.text or "").strip(): return label.text
+    row = try_xp(option, "./ancestor::div[2]", False)
+    paragraph = try_xp(row, ".//p", False) if row else False
+    return ((paragraph.text if paragraph else "") or "").strip()
+
+
+def click_radio(option: WebElement) -> None:
+    '''Selects a radio option. The 2026 modal styles the native <input> as an invisible box under
+    its label, so a real click can be refused as out of bounds; fall back to a DOM click, which
+    toggles the radio and fires the same events.'''
+    try: actions.move_to_element(option).click().perform()
+    except WebDriverException: driver.execute_script("arguments[0].click();", option)
 
 
 def answer_questions(modal: WebElement, questions_list: set, work_location: str, job_description: str | None = None ) -> set:
@@ -946,6 +973,10 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                 label = Question.find_element(By.TAG_NAME, "label")
                 label_org = label.find_element(By.TAG_NAME, "span").text
             except: pass
+            # The 2026 modal has no <label><span> here. Seen live as 'Unknown [ "Select an option",
+            # "Yes", "No" ]': the dropdown was found but its question could not be read, so it could
+            # only ever be left unanswered.
+            if label_org == "Unknown": label_org = read_question_label(Question)
             # No default answer. `answer = 'Yes'` here meant an unclassified dropdown -
             # "Do you have an active security clearance?" - was answered Yes and submitted,
             # the same defect already removed from the radio branch below.
@@ -1008,13 +1039,14 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
             continue
         
         # Check if it's a radio Question
-        radio = try_xp(Question, './/fieldset[@data-test-form-builder-radio-button-form-component="true"]', False)
+        radio = (try_xp(Question, './/fieldset[@data-test-form-builder-radio-button-form-component="true"]', False)
+                 or try_xp(Question, ".//fieldset[@role='radiogroup']", False))
         if radio:
             prev_answer = None
             label = try_xp(radio, './/span[@data-test-form-builder-radio-button-form-component__title]', False)
             try: label = find_by_class(label, "visually-hidden", 2.0)
             except: pass
-            label_org = label.text if label else "Unknown"
+            label_org = label.text if label else read_question_label(Question)
             # No default answer. `answer = 'Yes'` here meant an unclassified label - "Do you
             # have an active security clearance?", "Are you a US citizen?" - was submitted as
             # a Yes on a real application.
@@ -1027,10 +1059,9 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
             option_texts = []       # visible label text only: the "<value>" suffix is a urn
             
             for option in options:
-                id = option.get_attribute("id")
-                option_label = try_xp(radio, f'.//label[@for="{id}"]', False)
-                option_texts.append(option_label.text if option_label else "")
-                options_labels.append( f'"{option_label.text if option_label else "Unknown"}"<{option.get_attribute("value")}>' ) # Saving option as "label <value>"
+                option_text = radio_option_text(radio, option)
+                option_texts.append(option_text)
+                options_labels.append( f'"{option_text or "Unknown"}"<{option.get_attribute("value")}>' ) # Saving option as "label <value>"
                 if option.is_selected(): prev_answer = options_labels[-1]
                 label_org += f' {options_labels[-1]},'
 
@@ -1056,7 +1087,7 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                         randomly_answered_questions.add((f'{label_org} ]',"radio"))
                         unanswered_questions.add(f'{label_org} ]')
                     else:
-                        actions.move_to_element(options[matched]).click().perform()
+                        click_radio(options[matched])
                         answer = options_labels[matched]
             else: answer = prev_answer
             questions_list.add((label_org+" ]", answer, "radio", prev_answer))

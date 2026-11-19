@@ -268,6 +268,120 @@ def test_a_pagination_element_that_stays_unreadable_ends_the_search_not_the_run(
     assert bot.turn_page(Stale(), 2) is False                 # still stale after one re-read
 
 
+# ---- radio questions on the 2026 modal (captured from a real stalled "Additional Questions" step) ----
+class RadioOption(FakeElement):
+    '''One native <input type=radio> as the 2026 modal renders it: no useful value attribute, an
+    EMPTY <label for>, and the words "Yes" / "No" in a <p> in its row, two <div>s up.'''
+
+    def __init__(self, id, option_text, question):
+        row = FakeElement(children={".//p": FakeElement(text=option_text)})
+        super().__init__(children={"./ancestor::div[2]": row})
+        self.id, self.question, self.selected = id, question, False
+
+    def get_attribute(self, name):
+        return {"id": self.id, "value": "on", "aria-label": self.question}.get(name)
+
+    def is_selected(self):
+        return self.selected
+
+
+def new_layout_radio(question_text, *option_texts):
+    '''(container, options) shaped like the captured step. The easyApplyFieldFocus_ key is on the
+    container itself, which already holds its own <p>, unlike a text box.'''
+    question = question_text.rstrip("*").strip()
+    options = [RadioOption(f"_r_{n}_", text, question) for n, text in enumerate(option_texts)]
+    fieldset = FakeElement(children={"input": options,
+                                     **{f'.//label[@for="{o.id}"]': FakeElement(text="") for o in options}})
+    container = FakeElement(children={
+        "./p": [FakeElement(text=question_text)],
+        ".//fieldset[@role='radiogroup']": fieldset,
+        ".//label[@for]": FakeElement(text=""),      # the first option's empty label is found first
+        ARIA_FIELD_XPATH: options[0],                # every radio input repeats the question as its aria-label
+        ".//p": FakeElement(text=question_text),
+    })
+    return container, options
+
+
+class ClickRecorder:
+    def __init__(self):
+        self.clicked, self._target = [], None
+
+    def move_to_element(self, element):
+        self._target = element
+        return self
+
+    def click(self):
+        self.clicked.append(self._target)
+        return self
+
+    def perform(self):
+        return None
+
+
+def test_a_radio_question_is_its_own_container_not_merged_into_its_parent(bot):
+    '''Taking the parent for every field merged every question on the step into one container, in
+    which no radio group was recognised - so the form stalled with no question seen at all.'''
+    container, _ = new_layout_radio("Do you have experience with low-code?*", "Yes", "No")
+    text_wrapper, text_parent, _ = new_layout_question("What is your notice period?*")
+    assert bot.find_question_elements(new_layout_modal(bot, container, text_wrapper)) == [container, text_parent]
+
+
+def test_a_radio_question_is_not_read_as_empty_because_its_option_labels_are(bot):
+    container, _ = new_layout_radio("Do you have experience with low-code?*", "Yes", "No")
+    assert bot.read_question_label(container) == "Do you have experience with low-code?"
+
+
+def test_radio_option_text_comes_from_the_row_when_the_label_is_empty(bot):
+    container, options = new_layout_radio("Q?*", "Yes", "No")
+    fieldset = container.children[".//fieldset[@role='radiogroup']"]
+    assert [bot.radio_option_text(fieldset, o) for o in options] == ["Yes", "No"]
+
+
+def run_radio_question(bot, monkeypatch, container):
+    recorder = ClickRecorder()
+    monkeypatch.setattr(bot, "actions", recorder)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    questions = bot.answer_questions(new_layout_modal(bot, container), set(), "Chennai")
+    return recorder.clicked, questions
+
+
+def test_a_configured_radio_answer_is_clicked_on_the_new_modal(bot, monkeypatch):
+    '''Yes/No questions are among the commonest on Easy Apply, and every one was invisible here.'''
+    container, options = new_layout_radio("Are you legally authorized to work in India?*", "Yes", "No")
+    monkeypatch.setattr(bot, "work_authorization_answer", lambda label: "Yes")
+    clicked, questions = run_radio_question(bot, monkeypatch, container)
+    assert clicked == [options[0]], "did not click the Yes option"
+    assert any("Are you legally authorized" in entry[0] for entry in questions)
+
+
+def test_a_radio_question_with_no_configured_answer_is_left_alone_not_guessed(bot, monkeypatch):
+    '''Never click whatever is first: that submits a made-up answer to a real employer.'''
+    container, _ = new_layout_radio("Prior experience with low-code platforms is required.*", "Yes", "No")
+    monkeypatch.setattr(bot, "work_authorization_answer", lambda label: None)
+    monkeypatch.setattr(bot, "answer_common_questions", lambda label, answer: answer)
+    bot.unanswered_questions.clear()
+    clicked, _ = run_radio_question(bot, monkeypatch, container)
+    assert clicked == []
+    assert any("low-code" in q for q in bot.unanswered_questions)
+
+
+def test_a_radio_click_falls_back_to_the_dom_when_a_real_click_is_refused(bot, monkeypatch):
+    '''The native input is an invisible box under its label, so a real click can be refused.'''
+    from selenium.common.exceptions import MoveTargetOutOfBoundsException
+    scripts = []
+
+    class Refusing:
+        def move_to_element(self, element):
+            raise MoveTargetOutOfBoundsException("target out of bounds")
+
+    monkeypatch.setattr(bot, "actions", Refusing())
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        execute_script=lambda script, *args: scripts.append((script, args))))
+    option = RadioOption("_r_0_", "Yes", "Q?")
+    bot.click_radio(option)
+    assert len(scripts) == 1 and "click()" in scripts[0][0] and scripts[0][1] == (option,)
+
+
 def test_every_stalled_form_gets_its_own_dump_up_to_a_cap(bot):
     '''One dump per run kept only the first stall. The first live stall was a CTC box LinkedIn
     rejected; the second had no recognised question at all, and its markup was never saved, so
