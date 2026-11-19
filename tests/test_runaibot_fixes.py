@@ -100,6 +100,143 @@ def test_text_question_is_typed_through_human_type(bot, monkeypatch):
     assert typed == [(text_input, bot.first_name)]
 
 
+# -------- the 2026 Easy Apply modal: questions must be FOUND before they can be answered --------
+class AriaField(FakeElement):
+    '''An <input type=text> whose question is its aria-label, as on LinkedIn's 2026 modal.'''
+
+    def __init__(self, aria):
+        super().__init__()
+        self.aria = aria
+
+    def get_attribute(self, name):
+        return {"aria-label": self.aria, "value": self.value}.get(name)
+
+
+ARIA_FIELD_XPATH = ".//*[(self::input or self::textarea) and @aria-label]"
+
+
+def new_layout_question(question_text, aria=None):
+    '''(wrapper, parent, field) for one question, shaped like the captured "Additional Questions"
+    step: <div><p>Q*</p><div componentkey="easyApplyFieldFocus_..."><input aria-label="Q"></div></div>.
+    The wrapper is the easyApplyFieldFocus_ div; its parent holds the <p>.'''
+    field = AriaField(question_text.rstrip("*").strip() if aria is None else aria)
+    parent = FakeElement(children={
+        ".//input[@type='text']": field,
+        ARIA_FIELD_XPATH: field,
+        ".//p": FakeElement(text=question_text),
+    })
+    return FakeElement(children={"..": parent}), parent, field
+
+
+def new_layout_modal(bot, *wrappers):
+    return FakeElement(children={".//div[@data-test-form-element]": [],
+                                 bot.NEW_LAYOUT_FIELD_XPATH: list(wrappers)})
+
+
+def test_new_layout_questions_are_found_through_their_field_wrappers(bot):
+    '''answer_questions() only looked for data-test-form-element, which the new modal does not
+    have, so it saw no questions at all, answered nothing and stalled on "Invalid input".'''
+    wrapper_a, parent_a, _ = new_layout_question("What is your notice period?*")
+    wrapper_b, parent_b, _ = new_layout_question("What is your current and expected ctc ?*")
+    assert bot.find_question_elements(new_layout_modal(bot, wrapper_a, wrapper_b)) == [parent_a, parent_b]
+
+
+def test_two_fields_under_one_parent_are_one_question(bot):
+    wrapper, parent, _ = new_layout_question("Preferred work mode?*")
+    twin = FakeElement(children={"..": parent})
+    assert bot.find_question_elements(new_layout_modal(bot, wrapper, twin)) == [parent]
+
+
+def test_the_classic_layout_is_still_preferred_when_present(bot):
+    classic = FakeElement()
+    wrapper, _, _ = new_layout_question("Anything?*")
+    modal = FakeElement(children={".//div[@data-test-form-element]": [classic],
+                                  bot.NEW_LAYOUT_FIELD_XPATH: [wrapper]})
+    assert bot.find_question_elements(modal) == [classic]
+
+
+def test_new_layout_label_comes_from_the_field_without_its_asterisk(bot):
+    _, parent, _ = new_layout_question("What is your notice period?*")
+    assert bot.read_question_label(parent) == "What is your notice period?"
+
+
+def test_new_layout_label_falls_back_to_the_paragraph(bot):
+    parent = FakeElement(children={".//p": FakeElement(text="Do you have a laptop?*")})
+    assert bot.read_question_label(parent) == "Do you have a laptop?"
+
+
+def test_an_unreadable_label_is_unknown_not_empty(bot):
+    assert bot.read_question_label(FakeElement()) == "Unknown"
+
+
+def test_the_classic_label_is_read_exactly_as_before(bot):
+    parent = FakeElement(children={".//label[@for]": FakeElement(text="First name")})
+    assert bot.read_question_label(parent) == "First name"
+
+
+@pytest.fixture
+def money(bot, monkeypatch):
+    '''Fixed figures, so these tests do not depend on the developer's own user_config.json.'''
+    monkeypatch.setattr(bot, "current_ctc", "400000")
+    monkeypatch.setattr(bot, "desired_salary", "800000")
+    monkeypatch.setattr(bot, "notice_period", "15")
+
+
+def answer_new_layout(bot, monkeypatch, *question_texts):
+    typed = []
+    monkeypatch.setattr(bot, "human_type", lambda target, text: typed.append(text), raising=False)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    wrappers = [new_layout_question(t)[0] for t in question_texts]
+    bot.answer_questions(new_layout_modal(bot, *wrappers), set(), "Chennai")
+    return typed
+
+
+def test_the_two_questions_that_stalled_a_real_application_are_now_answered(bot, monkeypatch, money):
+    '''Captured live at step 4 of 5: both boxes required, both empty, "Invalid input", and the
+    bot looped on Review until it gave up.'''
+    typed = answer_new_layout(bot, monkeypatch,
+                              "What is your current and expected ctc ?*",
+                              "What is your notice period?*")
+    assert typed == ["400000 / 800000", "15"]
+
+
+def test_a_current_and_expected_ctc_box_gets_both_figures_and_fits_twenty_characters(bot, monkeypatch, money):
+    '''Answering "current and expected" with the current figure alone would send half an answer
+    to a real employer. The box on the live page allowed 20 characters.'''
+    (answer,) = answer_new_layout(bot, monkeypatch, "What is your current and expected ctc ?*")
+    assert "400000" in answer and "800000" in answer
+    assert len(answer) <= 20
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("What is your current ctc?*", "400000"),
+    ("What is your expected salary?*", "800000"),
+    ("What is your present compensation?*", "400000"),
+    ("What is your desired salary?*", "800000"),
+])
+def test_a_single_figure_ctc_question_still_gets_a_single_figure(bot, monkeypatch, money, question, expected):
+    assert answer_new_layout(bot, monkeypatch, question) == [expected]
+
+
+def test_a_question_with_no_configured_answer_is_left_empty_not_guessed(bot, monkeypatch, money):
+    '''The stall guard then skips the job, which is right: a guess goes to a real employer.'''
+    bot.unanswered_questions.clear()
+    answer_new_layout(bot, monkeypatch, "What is your favourite colour?*")
+    assert "What is your favourite colour?" in bot.unanswered_questions
+
+
+def test_a_failed_submit_click_is_never_recorded_as_applied(bot):
+    '''When Submit could not be clicked and nothing else was flagged, no reason was set, nothing
+    raised, and the job fell through to submitted_jobs() as "Easy Applied" with Date Applied
+    "Pending" and was counted in the summary, though nothing had been sent. One such row
+    (job 4471277293) is in the real history.'''
+    source = inspect.getsource(bot.apply_to_jobs)
+    failed = source.split("Since, Submit Application failed", 1)[1] \
+                   .split("if discard_reason: raise Exception(discard_reason)", 1)[0]
+    assert 'discard_reason = "Failed to click Submit application' in failed
+    assert 'if errored == "nose"' not in failed, "the reason is conditional again"
+
+
 # ------------------------------ K: whole-word bad words ----------------------------
 @pytest.mark.parametrize("text, words, expected", [
     ("Senior JavaScript Engineer", ["java"], None),          # the #95 bug: java != javascript

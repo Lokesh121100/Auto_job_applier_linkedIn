@@ -853,12 +853,57 @@ def answer_common_questions(label: str, answer: str | None) -> str | None:
 
 
 # Function to answer the questions for Easy Apply
+# LinkedIn's 2026 Easy Apply modal has no `data-test-form-element` and no <label for>. Each field
+# sits in a wrapper keyed `easyApplyFieldFocus_...`, and the question is a <p> beside that wrapper,
+# inside its PARENT. Read from a real captured step ("Additional Questions", 4/5 pages):
+#   <div><p>What is your notice period?*</p>
+#        <div componentkey="easyApplyFieldFocus_ea_validation_p3_0_..."><input required type="text"
+#             aria-label="What is your notice period?">...</div></div>
+NEW_LAYOUT_FIELD_XPATH = ".//div[starts-with(@componentkey,'easyApplyFieldFocus_')]"
+
+
+def find_question_elements(modal: WebElement) -> list[WebElement]:
+    '''The container of every question in the open Easy Apply step, on either layout.
+
+    answer_questions() used to look only for `data-test-form-element`. On the new modal that
+    matches nothing, so it answered nothing, clicked Review into "Invalid input" on every
+    required box and gave up after 15 passes - which is why Easy Apply completed on one job in
+    four. The questions were not unanswered there, they were never even seen.
+    '''
+    questions = modal.find_elements(By.XPATH, ".//div[@data-test-form-element]")
+    if questions: return questions
+    found: list[WebElement] = []
+    for field in modal.find_elements(By.XPATH, NEW_LAYOUT_FIELD_XPATH):
+        try: container = field.find_element(By.XPATH, "..")
+        except WebDriverException: continue
+        if container not in found: found.append(container)
+    return found
+
+
+def read_question_label(question: WebElement) -> str:
+    '''The question's text from either layout, or "Unknown" when it can't be read.'''
+    label = try_xp(question, ".//label[@for]", False)
+    if label:
+        # Classic layout, unchanged: the visually-hidden span holds the clean text.
+        try: label = label.find_element(By.CLASS_NAME, 'visually-hidden')
+        except Exception: pass
+        return label.text
+    # New layout: the field repeats its question as its aria-label, which has no trailing "*".
+    field = try_xp(question, ".//*[(self::input or self::textarea) and @aria-label]", False)
+    text = ((field.get_attribute("aria-label") if field else "") or "").strip()
+    if not text:
+        paragraph = try_xp(question, ".//p", False)
+        text = ((paragraph.text if paragraph else "") or "").strip()
+    return text.rstrip("*").strip() or "Unknown"
+
+
 def answer_questions(modal: WebElement, questions_list: set, work_location: str, job_description: str | None = None ) -> set:
     # Get all questions from the page
-     
+
     # The container class churns (it is `fb-dash-form-element` today, paired with a random
-    # class). `data-test-form-element` is the attribute that has survived every restyle.
-    all_questions = modal.find_elements(By.XPATH, ".//div[@data-test-form-element]")
+    # class). `data-test-form-element` is the attribute that has survived every restyle - until
+    # the 2026 modal, which find_question_elements() handles.
+    all_questions = find_question_elements(modal)
     # Per-pass, not cumulative: the caller compares consecutive passes to spot a stall.
     unanswered_questions.clear()
     # all_list_questions = modal.find_elements(By.XPATH, ".//div[@data-test-text-entity-list-form-component]")
@@ -996,11 +1041,8 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
         
         # Check if it's a text question
         text = try_xp(Question, ".//input[@type='text']", False)
-        if text: 
-            label = try_xp(Question, ".//label[@for]", False)
-            try: label = label.find_element(By.CLASS_NAME,'visually-hidden')
-            except: pass
-            label_org = label.text if label else "Unknown"
+        if text:
+            label_org = read_question_label(Question)
             answer = "" # years_of_experience
             label = label_org.lower()
 
@@ -1039,8 +1081,14 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     elif label_has(label, 'week', 'weeks', 'weekly'):
                         answer = notice_period_weeks
                     else: answer = notice_period
-                elif label_has(label, 'salary', 'compensation', 'ctc', 'pay'): 
-                    if label_has(label, 'current', 'present'):
+                elif label_has(label, 'salary', 'compensation', 'ctc', 'pay'):
+                    if label_has(label, 'current', 'present') and label_has(label, 'expected', 'desired', 'expectation'):
+                        # One box, two numbers: "What is your current and expected ctc ?". Answering
+                        # with only the current figure submits half an answer to a real employer, so
+                        # give both, in the order the question asks. Both are plain numbers, so this
+                        # fits the 20-character limit LinkedIn put on that box.
+                        answer = f"{current_ctc} / {desired_salary}"
+                    elif label_has(label, 'current', 'present'):
                         if label_has(label, 'month', 'months', 'monthly'):
                             answer = current_ctc_monthly
                         elif label_has(label, 'lakh', 'lakhs'):
@@ -1094,8 +1142,7 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
         # Check if it's a textarea question
         text_area = try_xp(Question, ".//textarea", False)
         if text_area:
-            label = try_xp(Question, ".//label[@for]", False)
-            label_org = label.text if label else "Unknown"
+            label_org = read_question_label(Question)
             label = label_org.lower()
             answer = ""
             prev_answer = text_area.get_attribute("value")
@@ -1834,7 +1881,13 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                                         logger.warning("Since, Submit Application failed, discarding the job application...")
                                         # if screenshot_name == "Not Available":  screenshot_name = screenshot(driver, job_id, "Failed to click Submit application")
                                         # else:   screenshot_name = [screenshot_name, screenshot(driver, job_id, "Failed to click Submit application")]
-                                        if errored == "nose": discard_reason = "Failed to click Submit application 😑"
+                                        # Unconditional. This used to apply only when errored == "nose", so a failed
+                                        # Submit click with no other error set no reason, raised nothing, and fell
+                                        # through to submitted_jobs(): the job was written down as "Easy Applied" with
+                                        # Date Applied "Pending" and counted in the run summary although nothing had
+                                        # been sent. One such row is in the history (job 4471277293). "stuck" cannot
+                                        # reach here - it set its own reason above and skipped this whole block.
+                                        discard_reason = "Failed to click Submit application 😑"
                             # Outside the finally, so this only runs when no real exception is
                             # already on its way up - it can't destroy the genuine cause any more.
                             if discard_reason: raise Exception(discard_reason)
