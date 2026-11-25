@@ -194,3 +194,40 @@ def test_real_career_ops_run(cv):
     assert result.score is not None, result.note
     assert "Kubernetes" in result.missing
     assert "Power Apps" in result.present
+
+
+# ------------- no skills found AND a title outside your field: skip -------------------
+TITLE_WORDS = ["Developer", ".NET", "Power BI", "Data Analyst"]
+NO_SKILLS = career_ops.JobScore(None, [], [], note="only 0 recognised skill(s) in the description - not enough to judge")
+
+
+def test_zero_skills_and_an_off_field_title_is_skipped(monkeypatch):
+    '''Seen live 2026-11-19: "Chartered Accountant" (accounting, MIS, Ind AS) was Easy Applied
+    to because 0 recognised skills meant "not enough to judge, applying anyway".'''
+    monkeypatch.setattr(career_ops, "career_ops_scoring", True)
+    monkeypatch.setattr(career_ops, "score_job", lambda *a, **k: NO_SKILLS)
+    reason = career_ops.check_job_fit(JD, title="Chartered Accountant", title_keywords=TITLE_WORDS)
+    assert reason and "Chartered Accountant" in reason
+
+
+def test_zero_skills_but_a_title_in_your_field_still_applies(monkeypatch):
+    '''Some real matches score 0 too - UPS ".NET" postings open with ~2,000 characters of
+    company boilerplate. The title is the evidence there, so they must not be skipped.'''
+    monkeypatch.setattr(career_ops, "career_ops_scoring", True)
+    monkeypatch.setattr(career_ops, "score_job", lambda *a, **k: NO_SKILLS)
+    assert career_ops.check_job_fit(JD, title="Senior Application Developer - .NET", title_keywords=TITLE_WORDS) is None
+
+
+def test_zero_skills_without_title_words_keeps_the_old_behaviour(monkeypatch):
+    '''Naukri calls check_job_fit with the description only; nothing changes for it.'''
+    monkeypatch.setattr(career_ops, "career_ops_scoring", True)
+    monkeypatch.setattr(career_ops, "score_job", lambda *a, **k: NO_SKILLS)
+    assert career_ops.check_job_fit(JD) is None
+    assert career_ops.check_job_fit(JD, title="Chartered Accountant", title_keywords=[]) is None
+
+
+def test_one_or_two_skills_is_still_not_enough_to_skip(monkeypatch):
+    '''Only a description with NO recognised skill is evidence of the wrong field.'''
+    monkeypatch.setattr(career_ops, "career_ops_scoring", True)
+    monkeypatch.setattr(career_ops, "score_job", lambda *a, **k: career_ops.JobScore(None, ["SQL"], [], note="only 1"))
+    assert career_ops.check_job_fit(JD, title="Business Intelligence Lead", title_keywords=TITLE_WORDS) is None

@@ -761,15 +761,17 @@ def test_intercepted_card_click_is_retried_after_closing_the_dialog(bot, monkeyp
     assert (title, company, skip) == ("Power Platform Developer", "Acme", False)
 
 
-def test_a_click_nothing_can_unblock_falls_back_to_a_dom_click(bot, monkeypatch):
+@pytest.mark.parametrize("error", ["ElementClickInterceptedException",
+                                   "ElementNotInteractableException"])   # live 2026-11-23: ended the run
+def test_a_click_nothing_can_unblock_falls_back_to_a_dom_click(bot, monkeypatch, error):
     '''When the overlay cannot be closed, the click still has to land: a DOM click reaches the
     element whatever is painted on top. Live, giving up here cost a whole run.'''
-    from selenium.common.exceptions import ElementClickInterceptedException
+    from selenium.common import exceptions
     scripts = []
 
     class Blocked(FakeElement):
         def click(self):
-            raise ElementClickInterceptedException("element click intercepted")
+            raise getattr(exceptions, error)("element click failed")
 
     target = Blocked()
     monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
@@ -926,6 +928,69 @@ def quota_used_up(bot, monkeypatch):
     return clicked
 
 
+def test_connect_that_links_back_to_the_profile_uses_the_invite_page(bot, monkeypatch):
+    '''Live 2026-11-23: Connect is <a href="<the profile>"> and its pop-up renders in a shadow root,
+    so nothing was found and requests ended "Failed - could not find the Send button". LinkedIn's
+    own page /preload/custom-invite/?vanityName=<id> shows "Add a note" in a role=dialog.'''
+    sent, visited = [], []
+
+    class Btn(FakeElement):
+        def __init__(self, label):
+            super().__init__(text=label)
+            self.label = label
+
+        def click(self): sent.append(self.label)
+        def is_enabled(self): return True
+        def get_attribute(self, name): return "https://www.linkedin.com/in/shekar-x/" if name == "href" else None
+
+    box = types.SimpleNamespace(send_keys=lambda text: sent.append(("note", text)))
+
+    class Driver:
+        page_source = ""
+        current_url = "https://www.linkedin.com/in/shekar-x/"
+        switch_to = types.SimpleNamespace(default_content=lambda: None)
+        def get(self, url): visited.append(url)
+        def find_elements(self, by, xpath):
+            if "to connect" in xpath: return [Btn("connect")]
+            return [box] if xpath.endswith("//textarea") and visited else []
+
+    class Wait:
+        def __init__(self, driver, timeout): self.driver = driver
+        def until(self, check):
+            found = check(self.driver)
+            if not found: raise TimeoutError
+            return found
+
+    buttons = {"add a note": Btn("add a note"), "send": Btn("send")}
+    monkeypatch.setattr(bot, "driver", Driver())
+    monkeypatch.setattr(bot, "WebDriverWait", Wait)
+    monkeypatch.setattr(bot, "pick_first_displayed", lambda els: els[0] if els else None)
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "save_page_once", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "click_gap", 0)
+    monkeypatch.setattr(bot, "actions", types.SimpleNamespace(
+        send_keys=lambda *a: types.SimpleNamespace(perform=lambda: None)))
+    monkeypatch.setattr(bot, "invite_button",
+                        lambda scope, label, exact=False: buttons.get(label) if visited else None)
+
+    result = bot.send_connection_request("SHEKAR GUNUKUNTLA", "Hi Shekar, I just applied...")
+
+    assert visited == ["https://www.linkedin.com/preload/custom-invite/?vanityName=shekar-x"]
+    assert result == "Sent with note"
+    assert ("note", "Hi Shekar, I just applied...") in sent and sent[-1] == "send"
+
+
+def test_a_failed_filter_step_logs_and_carries_on_without_a_dialog(bot, monkeypatch):
+    '''Live 2026-11-24: the "All filters" panel never opens on the 2026 search page, so every search
+    ended in a pyautogui dialog - an unattended run sat there until somebody clicked it.'''
+    monkeypatch.setattr(bot, "set_search_location", lambda: None)
+    monkeypatch.setattr(bot, "_apply_filters_once", lambda: (_ for _ in ()).throw(Exception("no All filters button")))
+    monkeypatch.setattr(bot.pyautogui, "confirm", lambda *a, **k: pytest.fail("a dialog stopped the run"))
+
+    bot.apply_filters()
+
+
 def test_note_quota_used_up_skips_the_person_when_a_note_is_required(bot, monkeypatch, quota_used_up):
     monkeypatch.setattr(bot, "referral_require_note", True)
     result = bot.send_connection_request("Asha Kumar", "Hi Asha, I just applied...")
@@ -984,3 +1049,146 @@ def test_locations_to_search_uses_the_list_when_set(bot, monkeypatch):
     monkeypatch.setattr(bot, "search_locations", ["Singapore", "Chennai", "Bengaluru"])
     monkeypatch.setattr(bot, "search_location", "India")
     assert bot.locations_to_search() == ["Singapore", "Chennai", "Bengaluru"]
+
+
+# --------------------------- check_blacklist: pages with no About Company box -------
+def _blacklist_page(bot, monkeypatch, about_company):
+    '''Fake page: the top card is always found; the About Company box is `about_company`
+    (a FakeElement) or None for a job page that has none.'''
+    top_card = FakeElement(text="Chennai · 2 days ago")
+
+    def fake_find_by_class(_driver, cls, *a, **k):
+        if cls == "jobs-company__box" and about_company is None:
+            raise NoSuchElementException(cls)
+        return about_company
+
+    monkeypatch.setattr(bot, "try_find_by_classes", lambda *a, **k: top_card)
+    monkeypatch.setattr(bot, "find_by_class", fake_find_by_class)
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "buffer", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    return top_card
+
+
+def test_check_blacklist_without_about_company_box_still_returns_top_card(bot, monkeypatch):
+    '''A job page with no About Company box used to raise out of check_blacklist before the
+    top card was returned, so the posted date was lost and the company check never ran.'''
+    top_card = _blacklist_page(bot, monkeypatch, None)
+
+    rejected, blacklisted, returned_card = bot.check_blacklist(set(), "1", "Acme", set())
+
+    assert returned_card is top_card
+    assert rejected == set() and blacklisted == set()
+
+
+def test_check_blacklist_still_rejects_a_bad_word_in_about_company(bot, monkeypatch):
+    _blacklist_page(bot, monkeypatch, FakeElement(text="We are a staffing agency"))
+    monkeypatch.setattr(bot, "about_company_good_words", [])
+    monkeypatch.setattr(bot, "about_company_bad_words", ["staffing"])
+
+    with pytest.raises(bot.BlacklistedCompanyFound):
+        bot.check_blacklist(set(), "1", "Acme", set())
+
+
+# ---------- the Easy Apply modal in a <dialog> that Selenium calls "not displayed" --------
+def test_modal_in_an_open_dialog_counts_even_if_selenium_says_hidden(bot, monkeypatch):
+    '''Seen live 2026-11-19: the Easy Apply form was open (the saved page showed "Apply to EXL,
+    1/7 pages" inside <dialog open>), yet the 12s wait never saw it, the bot pressed Escape,
+    raised "Save this application?" and then waited 20s for a company-site Apply button. The
+    form sits in a <dialog>, which the browser draws in its top layer; Selenium's is_displayed()
+    judges by the DOM ancestors and can call it hidden. An open dialog with a real size is open.'''
+    marker = FakeElement()
+    marker.is_displayed = lambda: False
+    scripts = []
+    def execute_script(script, *args):
+        scripts.append(script)
+        return True                       # inside dialog[open] and has a non-zero box
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xp: [marker], execute_script=execute_script))
+
+    assert bot.find_easy_apply_modal(0.1) is marker
+    assert scripts and "dialog" in scripts[0]
+
+
+def test_modal_hidden_and_not_in_an_open_dialog_is_not_open(bot, monkeypatch):
+    marker = FakeElement()
+    marker.is_displayed = lambda: False
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xp: [marker], execute_script=lambda script, *args: False))
+    assert bot.easy_apply_modal_is_open() is False
+
+
+def test_modal_check_survives_a_stale_element(bot, monkeypatch):
+    '''The SDUI screen re-renders while it loads; a stale match must not end the whole wait.'''
+    from selenium.common.exceptions import StaleElementReferenceException
+    stale, shown = FakeElement(), FakeElement()
+    def gone(): raise StaleElementReferenceException("re-rendered")
+    stale.is_displayed = gone
+    shown.is_displayed = lambda: True
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xp: [stale, shown], execute_script=lambda script, *args: False))
+    assert bot.find_easy_apply_modal(0.1) is shown
+
+
+def test_failed_apply_click_discards_an_open_form_instead_of_pressing_escape(bot, monkeypatch):
+    '''Escape on an open Easy Apply form raises "Save this application?", which then sat over
+    the page while the bot waited 20s for an Apply button that dialog was hiding.'''
+    calls = []
+    monkeypatch.setattr(bot, "find_easy_apply_modal", lambda timeout=0.5: FakeElement())
+    monkeypatch.setattr(bot, "discard_job", lambda: calls.append("discard"))
+    monkeypatch.setattr(bot, "actions", types.SimpleNamespace(
+        send_keys=lambda k: types.SimpleNamespace(perform=lambda: calls.append("escape"))))
+    bot.close_after_failed_apply_click()
+    assert calls == ["discard"]
+
+
+def test_failed_apply_click_presses_escape_when_no_form_is_open(bot, monkeypatch):
+    calls = []
+    monkeypatch.setattr(bot, "find_easy_apply_modal", lambda timeout=0.5: None)
+    monkeypatch.setattr(bot, "discard_job", lambda: calls.append("discard"))
+    monkeypatch.setattr(bot, "actions", types.SimpleNamespace(
+        send_keys=lambda k: types.SimpleNamespace(perform=lambda: calls.append("escape"))))
+    bot.close_after_failed_apply_click()
+    assert calls == ["escape"]
+
+
+
+# ---------- the 2026 job page has none of the old top-card classes -------------------
+def test_top_card_falls_back_to_the_2026_job_details_screen(bot, monkeypatch):
+    '''Seen live 2026-11-20: try_find_by_classes raised on every job (none of the four old
+    top-card classes exist any more), so check_blacklist failed on its FIRST line and the
+    posted date was lost every time. The 2026 page keeps the details - including the line
+    "Reposted 6 days ago" - in the SemanticJobDetails SDUI screen.'''
+    posted = FakeElement(text="Reposted 6 days ago")
+    details = FakeElement(children={'.//span[contains(normalize-space(), " ago")]': posted})
+    def no_old_classes(*a, **k): raise ValueError("Failed to find an element with given classes")
+    monkeypatch.setattr(bot, "try_find_by_classes", no_old_classes)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xp: [details] if "SemanticJobDetails" in xp else []))
+
+    card = bot.find_jobs_top_card()
+
+    assert card is details
+    assert "ago" in card.find_element(None, './/span[contains(normalize-space(), " ago")]').text
+
+
+def test_top_card_is_none_when_neither_layout_matches(bot, monkeypatch):
+    def no_old_classes(*a, **k): raise ValueError("none")
+    monkeypatch.setattr(bot, "try_find_by_classes", no_old_classes)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(find_elements=lambda by, xp: []))
+    assert bot.find_jobs_top_card() is None
+
+
+def test_check_blacklist_on_a_2026_page_returns_the_details_screen(bot, monkeypatch):
+    details = FakeElement(text="Reposted 6 days ago")
+    def no_old_classes(*a, **k): raise ValueError("none")
+    def no_company_box(_driver, cls, *a, **k): raise NoSuchElementException(cls)
+    monkeypatch.setattr(bot, "try_find_by_classes", no_old_classes)
+    monkeypatch.setattr(bot, "find_by_class", no_company_box)
+    monkeypatch.setattr(bot, "scroll_to_view", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "print_lg", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "driver", types.SimpleNamespace(
+        find_elements=lambda by, xp: [details] if "SemanticJobDetails" in xp else []))
+
+    _, _, card = bot.check_blacklist(set(), "1", "Acme", set())
+    assert card is details

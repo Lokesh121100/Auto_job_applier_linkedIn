@@ -350,62 +350,71 @@ def recommended_filter_wait(gap: int) -> int:
 
 def apply_filters() -> None:
     '''
-    Function to apply job search filters
+    Function to apply job search filters.
+
+    Known issue (seen live 2026-11-19/20): on the 2026 search page "All filters" opens but the
+    "Past week" option is never found, on every search, so the date filter is not applied.
+    A reload-and-retry was tried and does not help - it is not a timing race.
     '''
     set_search_location()
 
     try:
-        recommended_wait = recommended_filter_wait(click_gap)
-
-        # element_to_be_clickable, not presence: the filters button renders before it's usable.
-        wait.until(EC.element_to_be_clickable((By.XPATH, '//button[normalize-space()="All filters"]'))).click()
-        buffer(recommended_wait)
-
-        wait_span_click(driver, sort_by)
-        wait_span_click(driver, date_posted)
-        buffer(recommended_wait)
-
-        multi_sel_noWait(driver, experience_level) 
-        multi_sel_noWait(driver, companies, actions)
-        if experience_level or companies: buffer(recommended_wait)
-
-        multi_sel_noWait(driver, job_type)
-        multi_sel_noWait(driver, on_site)
-        if job_type or on_site: buffer(recommended_wait)
-
-        if easy_apply_only: boolean_button_click(driver, actions, "Easy Apply")
-        
-        multi_sel_noWait(driver, location)
-        multi_sel_noWait(driver, industry)
-        if location or industry: buffer(recommended_wait)
-
-        multi_sel_noWait(driver, job_function)
-        multi_sel_noWait(driver, job_titles)
-        if job_function or job_titles: buffer(recommended_wait)
-
-        if under_10_applicants: boolean_button_click(driver, actions, "Under 10 applicants")
-        if in_your_network: boolean_button_click(driver, actions, "In your network")
-        if fair_chance_employer: boolean_button_click(driver, actions, "Fair Chance Employer")
-
-        wait_span_click(driver, salary)
-        buffer(recommended_wait)
-        
-        multi_sel_noWait(driver, benefits)
-        multi_sel_noWait(driver, commitments)
-        if benefits or commitments: buffer(recommended_wait)
-
-        show_results_button: WebElement = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "apply current filters to show")]')))
-        show_results_button.click()
-        buffer(3)   # let the results reload settle before anything reads the list
-
-        global pause_after_filters
-        if pause_after_filters and "Turn off Pause after search" == pyautogui.confirm("These are your configured search results and filter. It is safe to change them while this dialog is open, any changes later could result in errors and skipping this search run.", "Please check your results", ["Turn off Pause after search", "Look's good, Continue"]):
-            pause_after_filters = False
-
+        _apply_filters_once()
     except Exception as e:
-        logger.warning("Setting the preferences failed!")
-        pyautogui.confirm(f"Faced error while applying filters. Please make sure correct filters are selected, click on show results and click on any button of this dialog, I know it sucks. Can't turn off Pause after search when error occurs! ERROR: {e}", ["Doesn't look good, but Continue XD", "Look's good, Continue"])
-        # print_lg(e)
+        # No dialog: the "All filters" panel never opens on the 2026 search page, so a dialog here
+        # stopped every search of an unattended run. The location rides in the search text and each
+        # job is checked on its own (experience, blacklist, already applied).
+        logger.warning("Setting the preferences failed (%s); searching without them.", type(e).__name__)
+
+
+def _apply_filters_once() -> None:
+    '''One pass through the "All filters" panel. Raises if any step fails.'''
+    recommended_wait = recommended_filter_wait(click_gap)
+
+    # element_to_be_clickable, not presence: the filters button renders before it's usable.
+    wait.until(EC.element_to_be_clickable((By.XPATH, '//button[normalize-space()="All filters"]'))).click()
+    buffer(recommended_wait)
+
+    wait_span_click(driver, sort_by)
+    wait_span_click(driver, date_posted)
+    buffer(recommended_wait)
+
+    multi_sel_noWait(driver, experience_level) 
+    multi_sel_noWait(driver, companies, actions)
+    if experience_level or companies: buffer(recommended_wait)
+
+    multi_sel_noWait(driver, job_type)
+    multi_sel_noWait(driver, on_site)
+    if job_type or on_site: buffer(recommended_wait)
+
+    if easy_apply_only: boolean_button_click(driver, actions, "Easy Apply")
+    
+    multi_sel_noWait(driver, location)
+    multi_sel_noWait(driver, industry)
+    if location or industry: buffer(recommended_wait)
+
+    multi_sel_noWait(driver, job_function)
+    multi_sel_noWait(driver, job_titles)
+    if job_function or job_titles: buffer(recommended_wait)
+
+    if under_10_applicants: boolean_button_click(driver, actions, "Under 10 applicants")
+    if in_your_network: boolean_button_click(driver, actions, "In your network")
+    if fair_chance_employer: boolean_button_click(driver, actions, "Fair Chance Employer")
+
+    wait_span_click(driver, salary)
+    buffer(recommended_wait)
+    
+    multi_sel_noWait(driver, benefits)
+    multi_sel_noWait(driver, commitments)
+    if benefits or commitments: buffer(recommended_wait)
+
+    show_results_button: WebElement = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "apply current filters to show")]')))
+    show_results_button.click()
+    buffer(3)   # let the results reload settle before anything reads the list
+
+    global pause_after_filters
+    if pause_after_filters and "Turn off Pause after search" == pyautogui.confirm("These are your configured search results and filter. It is safe to change them while this dialog is open, any changes later could result in errors and skipping this search run.", "Please check your results", ["Turn off Pause after search", "Look's good, Continue"]):
+        pause_after_filters = False
 
 
 
@@ -566,16 +575,18 @@ def click_through_overlays(element: WebElement) -> None:
     the dialog is tried first because it is the real repair; a DOM click is the fallback,
     since it reaches the element regardless of what is painted on top of it.
     '''
+    # Not-interactable too: live 2026-11-23 it escaped here and ended the run before referrals.
+    unclickable = (ElementClickInterceptedException, ElementNotInteractableException)
     try:
         element.click()
         return
-    except ElementClickInterceptedException:
+    except unclickable:
         pass
     dismiss_open_dialog()
     try:
         element.click()
         return
-    except ElementClickInterceptedException:
+    except unclickable:
         pass
     if "js" not in _overlay_logged:
         _overlay_logged.add("js")
@@ -730,6 +741,32 @@ total_experience_terms = ['years of experience', 'years experience', 'work exper
 # "years of experience IN Kubernetes", "experience WITH Python", "how many years USING AWS".
 skill_qualifier_terms = ['in', 'with', 'using', 'on']
 
+
+def asks_total_experience(label: str) -> bool:
+    '''True for a question about the user's TOTAL experience ("total years of professional experience",
+    "years of work experience in your chosen engineering field"), false once it names one skill.'''
+    if re.search(r"\byour (chosen |current |primary )?(\w+ )?(field|career|industry)\b", label):
+        return label_has(label, 'experience', 'years')
+    return bool(find_bad_word(label, total_experience_terms)) and not find_bad_word(label, skill_qualifier_terms)
+
+
+def years_option(years: str | None, option_texts: list[str]) -> str | None:
+    '''The option that states `years` of experience: "2 years", or a range holding it ("2,4", "1-3", "5+").
+    A range is half-open, so 2 is "2,4" and never "Less than 2". `None` when nothing fits - the caller
+    leaves the question unanswered, it never falls back to the first option.'''
+    try: want = float(years)
+    except (TypeError, ValueError): return None
+    for text in option_texts:
+        numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
+        lower = text.lower()
+        if len(numbers) == 2: fits = numbers[0] <= want < numbers[1]
+        elif len(numbers) != 1: fits = False
+        elif re.search(r"less than|under|below|fewer|<", lower): fits = want < numbers[0]
+        elif re.search(r"\+|more than|over|above|or more|at least", lower): fits = want >= numbers[0]
+        else: fits = want == numbers[0]
+        if fits: return text
+    return None
+
 def work_authorization_answer(label: str) -> str | None:
     '''
     The configured answer for a visa / authorization / citizenship question, else `None`.
@@ -785,10 +822,46 @@ def match_answer_to_option(answer: str | None, option_texts: list[str]) -> int |
 
 
 # Function to check for Blacklisted words in About Company
-def check_blacklist(rejected_jobs: set, job_id: str, company: str, blacklisted_companies: set) -> tuple[set, set, WebElement] | ValueError:
-    jobs_top_card = try_find_by_classes(driver, ["job-details-jobs-unified-top-card__primary-description-container","job-details-jobs-unified-top-card__primary-description","jobs-unified-top-card__primary-description","jobs-details__main-content"])
-    about_company_org = find_by_class(driver, "jobs-company__box")
-    scroll_to_view(driver, about_company_org)
+JOB_DETAILS_SCREEN_XPATH = "//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails']"
+
+
+def find_jobs_top_card() -> WebElement | None:
+    '''The block holding the job's top lines (location, "2 days ago", ...), or None.
+
+    None of the four classic top-card classes exist on the 2026 job page, so try_find_by_classes
+    raised on every job - check_blacklist failed on its first line and the posted date was lost
+    each time (seen live 2026-11-20). The 2026 page keeps those lines, e.g. "Reposted 6 days ago",
+    in the SemanticJobDetails SDUI screen, so that is the fallback.
+    '''
+    try:
+        return try_find_by_classes(driver, ["job-details-jobs-unified-top-card__primary-description-container","job-details-jobs-unified-top-card__primary-description","jobs-unified-top-card__primary-description","jobs-details__main-content"])
+    except Exception:
+        pass
+    try:
+        found = driver.find_elements(By.XPATH, JOB_DETAILS_SCREEN_XPATH)
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+_no_about_company_logged = False
+
+
+def check_blacklist(rejected_jobs: set, job_id: str, company: str, blacklisted_companies: set) -> tuple[set, set, WebElement | None]:
+    global _no_about_company_logged
+    jobs_top_card = find_jobs_top_card()
+    try:
+        about_company_org = find_by_class(driver, "jobs-company__box")
+        scroll_to_view(driver, about_company_org)
+    except Exception:
+        # The 2026 job page has no About Company section at all. Raising here threw away the top
+        # card found above, so the posted date was lost and every job warned twice. Nothing to
+        # blacklist-check on this page; still hand back the top card. Said once per run.
+        if not _no_about_company_logged:
+            _no_about_company_logged = True
+            print_lg("No About Company section on these job pages; the company blacklist check can't run on them.")
+        if jobs_top_card is not None: scroll_to_view(driver, jobs_top_card)
+        return rejected_jobs, blacklisted_companies, jobs_top_card
     about_company_org = about_company_org.text
     about_company = about_company_org.lower()
     skip_checking = False
@@ -1046,6 +1119,8 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                 auth_answer = work_authorization_answer(label)
                 if auth_answer is not None:
                     answer = auth_answer
+                elif asks_total_experience(label):
+                    answer = years_option(years_of_experience, optionsText)
                 elif label_has(label, 'email', 'phone'):
                     answer = prev_answer
                 elif label_has(label, 'gender', 'sex', 'sexual orientation'):
@@ -1116,6 +1191,7 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
             if overwrite_previous_answers or prev_answer is None:
                 auth_answer = work_authorization_answer(label)
                 if auth_answer is not None: answer = auth_answer
+                elif asks_total_experience(label): answer = years_option(years_of_experience, option_texts)
                 elif label_has(label, 'veteran', 'protected'): answer = veteran_status
                 elif label_has(label, 'disability', 'handicapped'): 
                     answer = disability_status
@@ -1156,7 +1232,7 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     # Only the total. "How many years of Kubernetes experience do you have?"
                     # and "...experience with Python?" ask about ONE skill, and the user's
                     # total is a false answer to those - leave them for config/questions.py.
-                    if find_bad_word(label, total_experience_terms) and not find_bad_word(label, skill_qualifier_terms):
+                    if asks_total_experience(label):
                         answer = years_of_experience
                 elif label_has(label, 'phone', 'mobile'): answer = phone_number
                 elif label_has(label, 'street'): answer = street
@@ -1170,12 +1246,17 @@ def answer_questions(modal: WebElement, questions_list: set, work_location: str,
                     answer = current_city if current_city else work_location
                     do_actions = True
                 elif label_has(label, 'signature'): answer = full_name # 'signature' in label or 'legal name' in label or 'your name' in label or 'full name' in label: answer = full_name     # What if question is 'name of the city or university you attend, name of referral etc?'
+                # Before the name branch: "Current company name" got the user's FULL NAME there.
+                # Needs a "current/name" word so "Why join our company?" is left alone.
+                elif (label_has(label, 'employer') or (label_has(label, 'company', 'organisation', 'organization')
+                        and label_has(label, 'current', 'present', 'recent', 'latest', 'name'))) \
+                        and not label_has(label, 'notice', 'salary', 'compensation', 'ctc', 'pay'):
+                    answer = recent_employer
                 elif label_has(label, 'name', 'surname'):
                     if label_has(label, 'full'): answer = full_name
                     elif label_has(label, 'first') and not label_has(label, 'last'): answer = first_name
                     elif label_has(label, 'middle') and not label_has(label, 'last'): answer = middle_name
                     elif label_has(label, 'last', 'surname') and not label_has(label, 'first'): answer = last_name
-                    elif label_has(label, 'employer'): answer = recent_employer
                     else: answer = full_name
                 elif label_has(label, 'notice'):
                     if label_has(label, 'month', 'months', 'monthly'):
@@ -1511,14 +1592,52 @@ EASY_APPLY_MODAL_XPATH = ("//*[@data-sdui-screen='com.linkedin.sdui.flagshipnav.
                           " | //*[contains(@class,'jobs-easy-apply-modal')]")
 
 
+def _modal_is_visible(m: WebElement) -> bool:
+    '''Whether a modal match is really on screen.
+
+    The 2026 form lives in a <dialog>, which the browser draws in its top layer. Selenium's
+    is_displayed() judges by the DOM ancestors and can call such a form hidden while it is open
+    - seen live: the saved page showed "Apply to EXL, 1/7 pages" inside <dialog open>, yet the
+    12s wait never saw it. So an element inside an open dialog with a real box also counts.
+    A stale match (the SDUI screen re-renders while loading) is just "not this one", instead
+    of an exception that used to end the whole wait.
+    '''
+    try:
+        if m.is_displayed(): return True
+    except Exception:
+        return False
+    try:
+        return bool(driver.execute_script(
+            "const d = arguments[0].closest('dialog');"
+            "if (!d || !d.open) return false;"
+            "const r = arguments[0].getBoundingClientRect();"
+            "return r.width > 0 && r.height > 0;", m))
+    except Exception:
+        return False
+
+
 def find_easy_apply_modal(timeout: float = 3) -> WebElement | None:
     '''The visible Easy Apply modal, or None if it isn't up within `timeout`.'''
     try:
         return WebDriverWait(driver, timeout).until(
             lambda d: next((m for m in d.find_elements(By.XPATH, EASY_APPLY_MODAL_XPATH)
-                            if m.is_displayed()), None))
+                            if _modal_is_visible(m)), None))
     except Exception:
         return None
+
+
+def close_after_failed_apply_click() -> None:
+    '''Clear the page after an apply click that didn't pan out.
+
+    Escape on an open Easy Apply form raises "Save this application?", and that box then sat over
+    the page while the bot waited 20s for a company-site Apply button it was hiding. If a form is
+    open, discard it properly; otherwise Escape closes whatever else popped up.
+    '''
+    if find_easy_apply_modal(0.5) is not None:
+        discard_job()
+        return
+    try: actions.send_keys(Keys.ESCAPE).perform()
+    except Exception: pass
 
 
 def easy_apply_modal_is_open() -> bool:
@@ -1569,6 +1688,16 @@ def discard_job() -> None:
         wait_xp_click(driver, discard_button_xpath, 5)
         if not easy_apply_modal_is_open(): return
     logger.warning("The Easy Apply modal is still open after trying to discard it.")
+
+
+def save_job_on_linkedin() -> None:
+    '''Bookmarks the open job (LinkedIn > My Jobs > Saved) so the user can finish it from the app.
+    Exact label: an already-saved job shows a different one, and clicking that would unsave it.'''
+    try:
+        driver.find_element(By.XPATH, "//button[@aria-label='Save the job']").click()
+        print_lg("Saved this job on LinkedIn too (My Jobs > Saved).")
+    except Exception:
+        print_lg("Couldn't find LinkedIn's Save button for this job (already saved, or the page changed).")
 
 
 def questions_are_stalled(previous_blocked: set | None) -> bool:
@@ -1838,7 +1967,9 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                         skip_count += 1
                         continue
 
-                    fit_skip = check_job_fit(description)
+                    # The title words double as "is this my field at all" for a description that
+                    # names none of the recognised skills (a "Chartered Accountant" got through).
+                    fit_skip = check_job_fit(description, title, company_mode_title_keywords)
                     if fit_skip:
                         print_lg(fit_skip)
                         failed_job(job_id, job_link, resume, date_listed, "Low Career-Ops match", fit_skip, "Skipped", screenshot_name)
@@ -1900,8 +2031,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                         except Exception as e:
                             print_lg(f"Easy Apply check '{how}' didn't pan out.", e)
                             # Dismiss whatever popped up and let the next strategy try.
-                            try: actions.send_keys(Keys.ESCAPE).perform()
-                            except: pass
+                            close_after_failed_apply_click()
                     if is_easy_apply:
                         try: 
                             # Bound before the try: the finally below scopes its clicks to the
@@ -2035,6 +2165,7 @@ def apply_to_jobs(search_terms: list[str], by_companies: list[str] | None = None
                             failed_job(job_id, job_link, resume, date_listed, str(e), "", application_link, screenshot_name)
                             skip_count += 1
                             discard_job()
+                            save_job_on_linkedin()
                             continue
 
                         except Exception as e:
@@ -2308,6 +2439,16 @@ def record_referral(company: str, job_title: str, person: str, profile_link: str
         logger.error("Failed to record the referral request!", exc_info=e)
 
 
+def invite_page_url(link: str | None) -> str | None:
+    '''LinkedIn's own invite page for a person. Their Connect link used to point straight at it; since
+    2026-11-23 it points back at the profile and the pop-up renders in a shadow root Selenium cannot
+    see, so the page is built from the profile's id instead. `None` when the link names neither.'''
+    if not link: return None
+    if "invite" in link: return link
+    person = re.search(r"/in/([^/?#]+)", link)
+    return f"https://www.linkedin.com/preload/custom-invite/?vanityName={person.group(1)}" if person else None
+
+
 def send_connection_request(person_name: str, note: str) -> str:
     '''
     On the open profile page, clicks Connect for `person_name`, adds `note` and sends. When
@@ -2333,7 +2474,7 @@ def send_connection_request(person_name: str, note: str) -> str:
         actions.send_keys(Keys.ESCAPE).perform()
         return "Skipped - no Connect button (already connected, pending, or follow-only)"
     scroll_to_view(driver, connect)
-    invite_url = connect.get_attribute("href")
+    invite_url = invite_page_url(connect.get_attribute("href") or driver.current_url)
     connect.click()
     buffer(click_gap + 1)
     # LinkedIn renders the invite inside <iframe data-testid="interop-iframe" src="/preload/...">.
@@ -2352,7 +2493,7 @@ def send_connection_request(person_name: str, note: str) -> str:
         try: WebDriverWait(driver, 6).until(lambda d: invite_button(scope, "add a note") or invite_button(scope, "send"))
         except Exception: pass
         save_page_once("invite_frame" if in_frame else "invite_dialog")
-        if not (invite_button(scope, "add a note") or invite_button(scope, "send")) and invite_url and "invite" in invite_url:
+        if not (invite_button(scope, "add a note") or invite_button(scope, "send")) and invite_url:
             # The invite never rendered here: open the invite page itself instead.
             if in_frame:
                 driver.switch_to.default_content()

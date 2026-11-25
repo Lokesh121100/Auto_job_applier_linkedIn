@@ -617,6 +617,117 @@ def test_the_text_classifications_that_were_right_still_answer(bot, monkeypatch,
     assert not bot.unanswered_questions
 
 
+@pytest.mark.parametrize("question", [
+    "Current Company",                  # live 2026-11-23: two Easy Apply jobs skipped on this
+    "Current company name",             # used to be answered with the user's FULL NAME
+    "Name of your present employer",
+    "Company name",
+])
+def test_a_current_company_question_gets_the_recent_employer(bot, monkeypatch, question):
+    monkeypatch.setattr(bot, "recent_employer", "Intelsoft Pte. Ltd.")
+    monkeypatch.setattr(bot, "full_name", "Jane Q Applicant")
+    modal, field = text_question(bot, monkeypatch, question)
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert field.value == "Intelsoft Pte. Ltd."
+    assert not bot.unanswered_questions
+
+
+def test_a_question_about_their_company_is_not_answered_with_ours(bot, monkeypatch):
+    monkeypatch.setattr(bot, "recent_employer", "Intelsoft Pte. Ltd.")
+    modal, field = text_question(bot, monkeypatch, "Why do you want to join our company?")
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert field.value == ""
+
+
+@pytest.mark.parametrize("question, setting, value", [
+    ("Current company notice period", "notice_period", "30"),
+    ("Current CTC at your present company", "current_ctc", "400000"),
+])
+def test_a_company_word_does_not_steal_notice_or_salary_questions(bot, monkeypatch, question,
+                                                                 setting, value):
+    monkeypatch.setattr(bot, "recent_employer", "Intelsoft Pte. Ltd.")
+    monkeypatch.setattr(bot, setting, value)
+    modal, field = text_question(bot, monkeypatch, question)
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert field.value == value
+
+
+# --------------------------- total years of experience -----------------------------
+@pytest.mark.parametrize("years, options, expected", [
+    ("2", ["Less than 2", "2,4", "4,6", "6,8", "10,12", "12+"], "2,4"),    # live 2026-11-24
+    ("2", ["0 year", "1 year", "2 years", "3 years", "30+ years"], "2 years"),
+    ("2", ["0-1", "1-3", "3-5", "5+"], "1-3"),
+    ("5", ["0-1", "1-3", "3-5", "5+"], "5+"),
+    ("2", ["Yes", "No"], None),
+    ("2", ["Select an option"], None),
+    ("", ["2 years"], None),
+    ("two", ["2 years"], None),
+])
+def test_years_option_picks_the_option_that_states_the_years(bot, years, options, expected):
+    assert bot.years_option(years, options) == expected
+
+
+@pytest.mark.parametrize("label, expected", [
+    ("please select your total years of professional experience:*", True),
+    ("how many years of work experience do you have in your chosen engineering field*", True),
+    ("how many years of work experience do you have with powershell?", False),
+    ("how many years of experience do you have using python?", False),
+    ("what is your expected salary?", False),
+])
+def test_asks_total_experience_only_for_the_total(bot, label, expected):
+    assert bot.asks_total_experience(label) is expected
+
+
+def test_a_total_years_dropdown_gets_the_matching_range(bot, monkeypatch):
+    monkeypatch.setattr(bot, "years_of_experience", "2")
+    modal, select = dropdown(bot, monkeypatch,
+                             "How Many Years of work experience do you have in your chosen engineering field*",
+                             ["Select an option", "Less than 2", "2,4", "4,6", "6,8", "10,12", "12+"])
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert select.picked == "2,4"
+    assert not bot.unanswered_questions
+
+
+def test_a_total_years_dropdown_with_one_option_per_year(bot, monkeypatch):
+    monkeypatch.setattr(bot, "years_of_experience", "2")
+    modal, select = dropdown(bot, monkeypatch, "Please select your total years of professional experience:*",
+                             ["Select an option", "0 year", "1 year", "2 years", "3 years", "30+ years"])
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert select.picked == "2 years"
+
+
+def test_a_years_with_one_skill_dropdown_is_still_left_unanswered(bot, monkeypatch):
+    '''The total is not a true answer for "years with Powershell": no skill table exists yet.'''
+    monkeypatch.setattr(bot, "years_of_experience", "2")
+    modal, select = dropdown(bot, monkeypatch, "How many years of work experience do you have with Powershell?",
+                             ["Select an option", "Less than 2", "2,4"])
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert select.picked is None
+    assert bot.unanswered_questions
+
+
+def test_a_total_years_radio_gets_the_matching_range(bot, monkeypatch):
+    monkeypatch.setattr(bot, "years_of_experience", "2")
+    modal, mouse, _ = radio_group(bot, monkeypatch, "Please select your total years of experience",
+                                  ["0-1", "1-3", "3-5"])
+
+    bot.answer_questions(modal, set(), "Remote")
+
+    assert mouse.clicked.text == "1-3"
+
+
 def test_an_unrecognised_dropdown_question_is_left_unanswered(bot, monkeypatch):
     '''The <select> twin of the radio default: `answer = 'Yes'` answered every
     unclassified dropdown - "Do you have an active security clearance?" - with a Yes.'''

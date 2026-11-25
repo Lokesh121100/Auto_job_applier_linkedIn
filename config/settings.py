@@ -161,7 +161,11 @@ career_ops_cv_path = "all resumes/default/resume.md"
 # counts towards the score, and is matched ignoring case and spaces ("PowerApps" = "Power Apps").
 career_ops_extra_skills = ["Power Apps", "Power Automate", "Power Platform", "Power Fx", "Dataverse",
                            "SharePoint", "SPFx", "Copilot Studio", "Dynamics 365", "Power Pages",
-                           "Microsoft Purview", "Entra ID", "PCF", "Selenium", "Flask"]
+                           "Microsoft Purview", "Entra ID", "PCF", "Selenium", "Flask",
+                           # Core stack from the resume that the built-in list missed: .NET and
+                           # Power BI jobs were scoring "0 recognised skills".
+                           ".NET", "ASP.NET Core", "C#", "Web API", "Entity Framework", "SQL Server",
+                           "Power BI", "DAX", "Power Query", "Azure", "Azure DevOps"]
 
 # Do you want scrolling to be smooth or instantaneous? (Can reduce performance if True)
 smooth_scroll = False               # True or False, Note: True or False are case-sensitive

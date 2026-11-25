@@ -116,8 +116,31 @@ def skip_reason(result: JobScore, min_score: int) -> str | None:
 _warned: set[str] = set()
 
 
-def check_job_fit(description: str) -> str | None:
-    '''Scores the job and prints the result. Returns why to skip it, or None to go ahead and apply.'''
+def off_field_reason(result: JobScore, title: str, title_keywords: list[str]) -> str | None:
+    '''Why to skip a job whose description names NONE of the recognised skills AND whose title
+    has none of your title words - or None.
+
+    Seen live 2026-11-19: "Chartered Accountant" (accounting, MIS, Ind AS) was Easy Applied to,
+    because 0 recognised skills meant "not enough to judge, applying anyway". Zero skills alone
+    can't decide it: some real matches score 0 too (UPS ".NET" postings open with ~2,000
+    characters of company boilerplate), and there the title is the evidence. So both must point
+    away from your field. The title match is generous on purpose - case and spaces ignored,
+    part of a word counts ("Developers", "PowerBI") - a wrong skip costs a real chance.
+    '''
+    if not title_keywords or not title or result.present or result.missing:
+        return None
+    if result.note == "no job description":
+        return None   # nothing was read; that is a different failure, handled where it's read
+    if any(_key(word) in _key(title) for word in title_keywords if word.strip()):
+        return None
+    return f'"{title}" names none of your title words and its description none of your skills - not your field.'
+
+
+def check_job_fit(description: str, title: str = "", title_keywords: list[str] | None = None) -> str | None:
+    '''Scores the job and prints the result. Returns why to skip it, or None to go ahead and apply.
+
+    `title` and `title_keywords` are optional: without them nothing is skipped for having no
+    recognised skills, which is how Naukri calls it.'''
     if not career_ops_scoring:
         return None
     result = score_job(description, cv_path=career_ops_cv_path, workspace=career_ops_path or str(DEFAULT_WORKSPACE),
@@ -127,6 +150,9 @@ def check_job_fit(description: str) -> str | None:
             _warned.add(result.note)
             logger.warning("Career-Ops scoring isn't working (%s) - applying without it.", result.note)
         elif not result.failed:
+            off_field = off_field_reason(result, title, title_keywords or [])
+            if off_field:
+                return off_field
             print_lg(f"Career-Ops: {result.note}, applying anyway.")
         return None
     print_lg(f"Career-Ops match: {result.score}% ({len(result.present)}/{len(result.present) + len(result.missing)} skills)"

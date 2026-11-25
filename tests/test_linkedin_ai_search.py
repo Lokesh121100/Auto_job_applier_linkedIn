@@ -105,10 +105,10 @@ def test_new_card_verified_title_is_not_doubled(bot, quiet):
 # ------------------------------- blacklist check ----------------------------------
 def test_missing_top_card_is_not_a_blacklist_hit(bot, quiet, monkeypatch):
     # The AI search page has no old top card; that must not read as "blacklisted company".
+    # Since 2026-11-20 it doesn't raise at all: the job goes on, nothing is rejected.
     monkeypatch.setattr(bot, "try_find_by_classes", lambda *a: (_ for _ in ()).throw(ValueError("Failed to find an element with given classes")))
-    with pytest.raises(Exception) as err:
-        bot.check_blacklist(set(), "1", "Acme", set())
-    assert not isinstance(err.value, bot.BlacklistedCompanyFound)
+    rejected, blacklisted, _ = bot.check_blacklist(set(), "1", "Acme", set())
+    assert rejected == set() and blacklisted == set()
 
 
 def test_real_blacklist_word_still_raises_blacklisted(bot, quiet, monkeypatch):
@@ -136,6 +136,28 @@ def test_new_card_already_applied_is_skipped_unclicked(bot, quiet):
 def test_new_card_blacklisted_company_is_skipped(bot, quiet):
     card = new_card("2", "Power Apps developer", "Bad Co", "Chennai")
     assert bot.get_job_main_details(card, {"Bad Co"}, set())[-1] is True
+
+
+# ------------------------------- save on LinkedIn ---------------------------------
+def test_a_job_the_bot_cannot_finish_is_saved_on_linkedin(bot, quiet, monkeypatch):
+    # Live 2026-11-23 page: <button aria-label="Save the job">. Exact label, so "Unsave" is never hit.
+    save = El()
+    monkeypatch.setattr(bot, "driver", El(children={"//button[@aria-label='Save the job']": [save]}))
+    bot.save_job_on_linkedin()
+    assert save.clicked
+
+
+def test_saving_on_linkedin_never_breaks_the_run(bot, quiet, monkeypatch):
+    monkeypatch.setattr(bot, "driver", El())
+    bot.save_job_on_linkedin()                      # no button: logs, does not raise
+
+
+def test_unanswered_jobs_are_saved_on_linkedin(bot):
+    import inspect
+    source = inspect.getsource(bot.apply_to_jobs)
+    start = source.index("except UnansweredQuestions")
+    branch = source[start:source.index("except Exception as e:", start)]
+    assert "save_job_on_linkedin()" in branch
 
 
 # ------------------------------- description --------------------------------------
